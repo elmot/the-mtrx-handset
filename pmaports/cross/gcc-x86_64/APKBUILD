@@ -1,6 +1,6 @@
 # Automatically generated aport, do not edit!
 # Generator: pmbootstrap aportgen gcc-x86_64
-# Based on: main/gcc
+# Based on: main/gcc (from Alpine)
 
 CTARGET_ARCH=x86_64
 CTARGET="$(arch_to_hostspec ${CTARGET_ARCH})"
