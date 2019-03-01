@@ -1,0 +1,24 @@
+pkgname=coreuniverse
+pkgver=2.4.0
+pkgrel=0
+pkgdesc="Shows information about apps from the CoreApps family."
+arch="all"
+url="https://gitlab.com/cubocore"
+license="GPL-2.0"
+depends="libcprime qt5-qtsvg"
+makedepends="qt5-qtbase-dev libcprime-dev"
+source="$pkgname-$pkgver.tar.gz::https://gitlab.com/cubocore/$pkgname/-/archive/v$pkgver/$pkgname-v$pkgver.tar.gz"
+builddir="$srcdir/$pkgname-v$pkgver"
+options="!check"
+
+build() {
+	cd "$builddir"
+	qmake-qt5
+	make
+}
+
+package() {
+	cd "$builddir"
+	INSTALL_ROOT="$pkgdir" make install
+}
+sha512sums="f602020fb25eee24982e92e4ff0cd8ebfae04e37bcd13f51ba36b48c8c2ebda5b0a067785f7c5511ca818a0796c939b4eb71ec4c2f3304556cc4098d36d2ffa6  coreuniverse-2.4.0.tar.gz"
