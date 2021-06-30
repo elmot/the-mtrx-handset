@@ -1,17 +1,22 @@
-# Maintainer: Ultracoolguy <myownpersonalaccount@protonmail.com>
+# Maintainer: Ultracoolguy <ultracoolguy@disroot.org>
 # Reference: <https://postmarketos.org/devicepkg>
 pkgname=device-motorola-ocean
 pkgdesc="Motorola Moto G7 Power"
-pkgver=0.2
+pkgver=0.3
 pkgrel=0
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
-depends="postmarketos-base mkbootimg mesa-dri-gallium"
+depends="
+	linux-postmarketos-qcom-msm8953
+	mkbootimg
+	mesa-dri-gallium
+	postmarketos-base
+"
 makedepends="devicepkg-dev"
 source="deviceinfo"
-subpackages="$pkgname-kernel-downstream:kernel_downstream $pkgname-kernel-mainline:kernel_mainline $pkgname-nonfree-firmware:nonfree_firmware"
+subpackages="$pkgname-nonfree-firmware:nonfree_firmware"
 
 build() {
 	devicepkg_build $startdir $pkgname
@@ -21,18 +26,6 @@ package() {
 	devicepkg_package $startdir $pkgname
 }
 
-kernel_downstream() {
-	pkgdesc="Wifi, USB, partially screen, and other miscellanious stuff works. (See device table for details)"
-	depends="linux-motorola-ocean wcnss-wlan"
-	devicepkg_subpackage_kernel $startdir $pkgname $subpkgname
-}
-
-kernel_mainline() {
-	pkgdesc="It's currently WIP. Most features don't work."
-	depends="linux-postmarketos-qcom-msm8953"
-	devicepkg_subpackage_kernel $startdir $pkgname $subpkgname
-}
-
 nonfree_firmware() {
 	pkgdesc="Wifi, GPU, modem, and audio firmware"
 	depends="firmware-motorola-ocean"
@@ -40,5 +33,5 @@ nonfree_firmware() {
 }
 
 sha512sums="
-7718e1d1c59f82832c446ccaac9bad6833339f5ba968942df10df538d11f90c431117ff2f5408262c5a9b333bfd1d3af96ab2913aacb380c919c465f61e9f759  deviceinfo
+8959c93adb1459c53953403e8ea90d73138f65d7a5349edac00918bce0a11187f1488172b821ed1417a54fd8029b043dbf85cee1f979a8da383a5c35ee024c44  deviceinfo
 "
