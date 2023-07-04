@@ -2,12 +2,12 @@
 pkgname=device-samsung-expressatt
 pkgdesc="Samsung Galaxy Express SGH-I437"
 pkgver=0.2
-pkgrel=1
+pkgrel=2
 url="https://postmarketos.org"
 license="MIT"
 arch="armv7"
 options="!check !archcheck"
-depends="postmarketos-base linux-samsung-expressatt mkbootimg"
+depends="postmarketos-base linux-postmarketos-qcom-msm8960 mkbootimg"
 makedepends="devicepkg-dev"
 source="deviceinfo"
 
@@ -21,5 +21,5 @@ package() {
 
 
 sha512sums="
-de2f550d9a95869d50e69935553606c5fda46dc10cf69e33a065f7ee99eeb4fa515c61b15fbe9eda198d958832bc4bae78b5ff3dfc6ea1df1ad0724e5ccfb061  deviceinfo
+e0884e5403c774c8609607f9158895028cf04a000df1f0d8054e22258e42f404671fc39ead2978d16d84c08c5f3f4136bed1e03a4dba4e1422351cda5f46f074  deviceinfo
 "
