@@ -8,8 +8,7 @@ deviceinfo_manufacturer="Kobo"
 deviceinfo_codename="kobo-clara"
 deviceinfo_year="2018"
 deviceinfo_arch="armv7"
-deviceinfo_dtb_downstream="imx6sll-e60k02"
-deviceinfo_dtb_mainline="imx6sll-kobo-clarahd"
+deviceinfo_dtb="imx6sll-kobo-clarahd"
 
 # Device related
 deviceinfo_chassis="tablet"
@@ -26,5 +25,4 @@ deviceinfo_generate_legacy_uboot_initfs="true"
 deviceinfo_no_framebuffer="true"
 
 deviceinfo_sd_embed_firmware_step_size="512"
-deviceinfo_sd_embed_firmware_downstream="u-boot/kobo-clara/u-boot.imx:2,firmware/kobo-clara/hwcfg+header.bin:1023,firmware/kobo-clara/ntxfw-E60K00+header.bin:1029,u-boot/kobo-clara/u-boot-env.bin:1536"
-deviceinfo_sd_embed_firmware_mainline="u-boot/kobo-clara/u-boot.imx:2,firmware/kobo-clara/hwcfg+header.bin:1023,u-boot/kobo-clara/u-boot-env.bin:1536"
+deviceinfo_sd_embed_firmware="u-boot/kobo-clara/u-boot.imx:2,u-boot/kobo-clara/u-boot-env.bin:1536"
