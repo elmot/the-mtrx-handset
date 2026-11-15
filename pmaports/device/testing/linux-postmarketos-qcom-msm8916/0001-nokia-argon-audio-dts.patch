@@ -1,0 +1,387 @@
+diff --git a/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts b/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
+index 724c5be8c..faac215c0 100644
+--- a/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
++++ b/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
+@@ -190,6 +190,18 @@ &blsp_uart1 {
+ 	status = "okay";
+ };
+ 
++&apr {
++	status = "okay";
++};
++
++&lpass_codec {
++	status = "okay";
++};
++
++&lpass_ter_clk {
++	status = "okay";
++};
++
+ &mpss {
+ 	status = "okay";
+ };
+@@ -209,6 +221,16 @@ &pm8909_charger {
+ 	status = "okay";
+ };
+ 
++&pm8909_codec {
++	qcom,micbias-lvl = <2800>;
++	qcom,mbhc-vthreshold-low = <75 150 237 450 500>;
++	qcom,mbhc-vthreshold-high = <75 150 237 450 500>;
++	qcom,hphl-jack-type-normally-open;
++	qcom,micbias1-ext-cap;
++	qcom,micbias2-ext-cap;
++	status = "okay";
++};
++
+ &pm8909_pwm {
+ 	pinctrl-0 = <&pwm_out>;
+ 	pinctrl-names = "default";
+@@ -224,6 +246,37 @@ &pm8909_vib {
+ 	status = "okay";
+ };
+ 
++&q6afedai {
++	dai@16 {
++		reg = <PRIMARY_MI2S_RX>;
++		qcom,sd-lines = <0 1>;
++	};
++	dai@20 {
++		reg = <TERTIARY_MI2S_TX>;
++		qcom,sd-lines = <0 1>;
++	};
++};
++
++&q6asmdai {
++	dai@0 {
++		reg = <0>;
++		direction = <Q6ASM_DAI_RX>;
++	};
++	dai@1 {
++		reg = <1>;
++		direction = <Q6ASM_DAI_TX>;
++	};
++	dai@2 {
++		reg = <2>;
++		direction = <Q6ASM_DAI_RX>;
++	};
++	dai@3 {
++		reg = <3>;
++		direction = <Q6ASM_DAI_RX>;
++		is-compress-dai;
++	};
++};
++
+ &sdhc_1 {
+ 	status = "okay";
+ };
+@@ -233,6 +286,90 @@ &sdhc_2 {
+ 	status = "okay";
+ };
+ 
++&sound {
++	compatible = "qcom,msm8916-qdsp6-sndcard";
++	model = "msm8916";
++
++	pinctrl-0 = <&cdc_pdm_default>;
++	pinctrl-1 = <&cdc_pdm_sleep>;
++	pinctrl-names = "default", "sleep";
++
++	audio-routing =
++		"AMIC1", "MIC BIAS External1",
++		"AMIC2", "MIC BIAS Internal2",
++		"AMIC3", "MIC BIAS External1";
++
++	status = "okay";
++
++	frontend0-dai-link {
++		link-name = "MultiMedia1";
++
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++		};
++	};
++
++	frontend1-dai-link {
++		link-name = "MultiMedia2";
++
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++		};
++	};
++
++	frontend2-dai-link {
++		link-name = "MultiMedia3";
++
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
++		};
++	};
++
++	frontend3-dai-link {
++		link-name = "MultiMedia4";
++
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA4>;
++		};
++	};
++
++	frontend4-dai-link {
++		link-name = "CS-Voice";
++
++		cpu {
++			sound-dai = <&q6voicedai CS_VOICE>;
++		};
++	};
++
++	sound_link_backend0: backend0-dai-link {
++		link-name = "Primary MI2S";
++
++		cpu {
++			sound-dai = <&q6afedai PRIMARY_MI2S_RX>;
++		};
++		platform {
++			sound-dai = <&q6routing>;
++		};
++		codec {
++			sound-dai = <&lpass_codec 0>, <&pm8909_codec 0>;
++		};
++	};
++
++	sound_link_backend1: backend1-dai-link {
++		link-name = "Tertiary MI2S";
++
++		cpu {
++			sound-dai = <&q6afedai TERTIARY_MI2S_TX>;
++		};
++		platform {
++			sound-dai = <&q6routing>;
++		};
++		codec {
++			sound-dai = <&lpass_codec 1>, <&pm8909_codec 1>;
++		};
++	};
++};
++
+ &usb {
+ 	extcon = <&pm8909_charger>;
+ 	status = "okay";
+diff --git a/arch/arm/boot/dts/qcom/qcom-msm8909-pm8909.dtsi b/arch/arm/boot/dts/qcom/qcom-msm8909-pm8909.dtsi
+index a1829c36b..98c581ee7 100644
+--- a/arch/arm/boot/dts/qcom/qcom-msm8909-pm8909.dtsi
++++ b/arch/arm/boot/dts/qcom/qcom-msm8909-pm8909.dtsi
+@@ -7,6 +7,12 @@ &mpss {
+ 	pll-supply = <&pm8909_l7>;
+ };
+ 
++&pm8909_codec {
++	vdd-cdc-io-supply = <&pm8909_l5>;
++	vdd-cdc-tx-rx-cx-supply = <&pm8909_s2>;
++	vdd-micbias-supply = <&pm8909_l13>;
++};
++
+ &sdhc_1 {
+ 	vmmc-supply = <&pm8909_l8>;
+ 	vqmmc-supply = <&pm8909_l5>;
+diff --git a/arch/arm/boot/dts/qcom/qcom-msm8909.dtsi b/arch/arm/boot/dts/qcom/qcom-msm8909.dtsi
+index afaff1782..8ae47d7cf 100644
+--- a/arch/arm/boot/dts/qcom/qcom-msm8909.dtsi
++++ b/arch/arm/boot/dts/qcom/qcom-msm8909.dtsi
+@@ -8,6 +8,10 @@
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/power/qcom-rpmpd.h>
++#include <dt-bindings/soc/qcom,apr.h>
++#include <dt-bindings/sound/qcom,q6afe.h>
++#include <dt-bindings/sound/qcom,q6asm.h>
++#include <dt-bindings/sound/qcom,q6voice.h>
+ #include <dt-bindings/thermal/thermal.h>
+ 
+ / {
+@@ -807,6 +811,24 @@ wcnss_pin_a: wcnss-active-state {
+ 				drive-strength = <6>;
+ 				bias-pull-up;
+ 			};
++
++			cdc_pdm_default: cdc-pdm-default-state {
++				pins = "gpio59", "gpio60", "gpio61",
++				       "gpio62", "gpio63", "gpio64";
++				function = "cdc_pdm0";
++
++				drive-strength = <8>;
++				bias-disable;
++			};
++
++			cdc_pdm_sleep: cdc-pdm-sleep-state {
++				pins = "gpio59", "gpio60", "gpio61",
++				       "gpio62", "gpio63", "gpio64";
++				function = "cdc_pdm0";
++
++				drive-strength = <2>;
++				bias-pull-down;
++			};
+ 		};
+ 
+ 		gcc: clock-controller@1800000 {
+@@ -924,9 +946,114 @@ smd-edge {
+ 				qcom,remote-pid = <1>;
+ 
+ 				label = "hexagon";
++
++				apr: apr {
++					compatible = "qcom,apr-v2";
++					qcom,smd-channels = "apr_audio_svc";
++					qcom,domain = <APR_DOMAIN_ADSP>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++					status = "disabled";
++
++					q6core: service@3 {
++						compatible = "qcom,q6core";
++						reg = <APR_SVC_ADSP_CORE>;
++					};
++
++					q6afe: service@4 {
++						compatible = "qcom,q6afe";
++						reg = <APR_SVC_AFE>;
++
++						q6afedai: dais {
++							compatible = "qcom,q6afe-dais";
++							#address-cells = <1>;
++							#size-cells = <0>;
++							#sound-dai-cells = <1>;
++						};
++
++						q6afecc: clock-controller {
++							compatible = "qcom,q6afe-clocks";
++							#clock-cells = <2>;
++						};
++					};
++
++					q6asm: service@7 {
++						compatible = "qcom,q6asm";
++						reg = <APR_SVC_ASM>;
++
++						q6asmdai: dais {
++							compatible = "qcom,q6asm-dais";
++							#address-cells = <1>;
++							#size-cells = <0>;
++							#sound-dai-cells = <1>;
++						};
++					};
++
++					q6adm: service@8 {
++						compatible = "qcom,q6adm";
++						reg = <APR_SVC_ADM>;
++
++						q6routing: routing {
++							compatible = "qcom,q6adm-routing";
++							#sound-dai-cells = <0>;
++						};
++					};
++
++					q6mvm: apr-service@9 {
++						compatible = "qcom,q6mvm";
++						reg = <APR_SVC_ADSP_MVM>;
++
++						q6voicedai: dais {
++							compatible = "qcom,q6voice-dais";
++							#sound-dai-cells = <0>;
++						};
++					};
++
++					q6cvs: apr-service@a {
++						compatible = "qcom,q6cvs";
++						reg = <APR_SVC_ADSP_CVS>;
++					};
++
++					q6cvp: apr-service@b {
++						compatible = "qcom,q6cvp";
++						reg = <APR_SVC_ADSP_CVP>;
++					};
++				};
+ 			};
+ 		};
+ 
++		sound: sound@7702000 {
++			status = "disabled";
++			compatible = "qcom,apq8016-sbc-sndcard";
++			reg = <0x07702000 0x4>, <0x07702004 0x4>;
++			reg-names = "mic-iomux", "spkr-iomux";
++		};
++
++		lpass_codec: audio-codec@771c000 {
++			compatible = "qcom,msm8916-wcd-digital-codec";
++			reg = <0x0771c000 0x400>;
++			assigned-clocks = <&q6afecc LPASS_CLK_ID_PRI_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++					  <&q6afecc LPASS_CLK_ID_INTERNAL_DIGITAL_CODEC_CORE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			assigned-clock-rates = <1536000>, <9600000>;
++			clocks = <&q6afecc LPASS_CLK_ID_PRI_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&q6afecc LPASS_CLK_ID_INTERNAL_DIGITAL_CODEC_CORE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			clock-names = "ahbix-clk", "mclk";
++			#sound-dai-cells = <1>;
++			status = "disabled";
++		};
++
++		lpass_ter_clk: audio-codec@771c400 {
++			compatible = "qcom,msm8916-wcd-digital-codec";
++			reg = <0x0771c400 0x400>;
++			assigned-clocks = <&q6afecc LPASS_CLK_ID_TER_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++			assigned-clock-rates = <1536000>;
++			clocks = <&q6afecc LPASS_CLK_ID_TER_MI2S_IBIT LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++				 <&xo_board>;
++			clock-names = "ahbix-clk", "mclk";
++			#sound-dai-cells = <1>;
++			status = "disabled";
++		};
++
+ 		sdhc_1: sdhci@7824000 {
+ 			compatible = "qcom,msm8916-sdhci", "qcom,sdhci-msm-v4";
+ 			reg = <0x07824900 0x11c>, <0x07824000 0x800>;
+diff --git a/arch/arm/boot/dts/qcom/qcom-pm8909.dtsi b/arch/arm/boot/dts/qcom/qcom-pm8909.dtsi
+index b632a1883..e988f8cf5 100644
+--- a/arch/arm/boot/dts/qcom/qcom-pm8909.dtsi
++++ b/arch/arm/boot/dts/qcom/qcom-pm8909.dtsi
+@@ -142,5 +142,41 @@ pm8909_vib: vibrator@c000 {
+ 			reg = <0xc000>;
+ 			status = "disabled";
+ 		};
++
++		pm8909_codec: audio-codec@f000 {
++			compatible = "qcom,pm8916-wcd-analog-codec";
++			reg = <0xf000>;
++			interrupt-parent = <&spmi_bus>;
++			interrupts = <0x1 0xf0 0x0 IRQ_TYPE_NONE>,
++				     <0x1 0xf0 0x1 IRQ_TYPE_NONE>,
++				     <0x1 0xf0 0x2 IRQ_TYPE_NONE>,
++				     <0x1 0xf0 0x3 IRQ_TYPE_NONE>,
++				     <0x1 0xf0 0x4 IRQ_TYPE_NONE>,
++				     <0x1 0xf0 0x5 IRQ_TYPE_NONE>,
++				     <0x1 0xf0 0x6 IRQ_TYPE_NONE>,
++				     <0x1 0xf0 0x7 IRQ_TYPE_NONE>,
++				     <0x1 0xf1 0x0 IRQ_TYPE_NONE>,
++				     <0x1 0xf1 0x1 IRQ_TYPE_NONE>,
++				     <0x1 0xf1 0x2 IRQ_TYPE_NONE>,
++				     <0x1 0xf1 0x3 IRQ_TYPE_NONE>,
++				     <0x1 0xf1 0x4 IRQ_TYPE_NONE>,
++				     <0x1 0xf1 0x5 IRQ_TYPE_NONE>;
++			interrupt-names = "cdc_spk_cnp_int",
++					  "cdc_spk_clip_int",
++					  "cdc_spk_ocp_int",
++					  "mbhc_ins_rem_det1",
++					  "mbhc_but_rel_det",
++					  "mbhc_but_press_det",
++					  "mbhc_ins_rem_det",
++					  "mbhc_switch_int",
++					  "cdc_ear_ocp_int",
++					  "cdc_hphr_ocp_int",
++					  "cdc_hphl_ocp_det",
++					  "cdc_ear_cnp_int",
++					  "cdc_hphr_cnp_int",
++					  "cdc_hphl_cnp_int";
++			#sound-dai-cells = <1>;
++			status = "disabled";
++		};
+ 	};
+ };
