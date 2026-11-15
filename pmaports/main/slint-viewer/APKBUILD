@@ -1,0 +1,39 @@
+# Maintainer:
+pkgname=slint-viewer
+pkgver=1.10.0
+pkgrel=0
+pkgdesc="Standalone previewer/runner binary for .slint UI files"
+url="https://slint.dev/"
+arch="armv7 aarch64 x86_64"
+license="GPL-3.0-only"
+depends="
+	libxkbcommon
+	mesa-egl
+	wayland-libs-client
+"
+makedepends="
+	cargo
+	libxkbcommon-dev
+	mesa-dev
+	wayland-dev
+"
+options="!check net" # cargo fetches crates during build
+source="slint-$pkgver.tar.gz::https://github.com/slint-ui/slint/archive/refs/tags/v$pkgver.tar.gz"
+builddir="$srcdir/slint-$pkgver"
+
+build() {
+	cargo build \
+		--release \
+		--manifest-path "$builddir/tools/viewer/Cargo.toml"
+}
+
+package() {
+	install -Dm755 "$builddir/target/release/slint-viewer" \
+		-t "$pkgdir"/usr/bin/
+}
+
+# Run `pmbootstrap checksum slint-viewer` to populate sha512sums
+
+sha512sums="
+e7463771e4282238bdb6e1405c0fa3bf2231254457430e3cca743331d653b4bfb4da65b94f136ecbe13a89529f2ee27aadb3b799902db51a9a45a961d1d35b48  slint-1.10.0.tar.gz
+"

@@ -1,0 +1,90 @@
+diff --git a/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts b/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
+index faac215c0..1efe32499 100644
+--- a/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
++++ b/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
+@@ -41,6 +41,11 @@ backlight: backlight {
+ 		default-brightness-level = <10>;
+ 	};
+ 
++	bt_sco: bt-sco {
++		compatible = "linux,bt-sco";
++		#sound-dai-cells = <1>;
++	};
++
+ 	bat: battery {
+ 		compatible = "simple-battery";
+ 		voltage-min-design-microvolt = <3400000>;
+@@ -255,6 +260,12 @@ dai@20 {
+ 		reg = <TERTIARY_MI2S_TX>;
+ 		qcom,sd-lines = <0 1>;
+ 	};
++	dai@136 {
++		reg = <INT_BT_SCO_RX>;
++	};
++	dai@137 {
++		reg = <INT_BT_SCO_TX>;
++	};
+ };
+ 
+ &q6asmdai {
+@@ -275,6 +286,10 @@ dai@3 {
+ 		direction = <Q6ASM_DAI_RX>;
+ 		is-compress-dai;
+ 	};
++	dai@4 {
++		reg = <4>;
++		direction = <Q6ASM_DAI_TX>;
++	};
+ };
+ 
+ &sdhc_1 {
+@@ -341,6 +356,14 @@ cpu {
+ 		};
+ 	};
+ 
++	frontend5-dai-link {
++		link-name = "MultiMedia5";
++
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA5>;
++		};
++	};
++
+ 	sound_link_backend0: backend0-dai-link {
+ 		link-name = "Primary MI2S";
+ 
+@@ -368,6 +391,34 @@ codec {
+ 			sound-dai = <&lpass_codec 1>, <&pm8909_codec 1>;
+ 		};
+ 	};
++
++	sound_link_backend2: backend2-dai-link {
++		link-name = "Internal BT-SCO Playback";
++
++		cpu {
++			sound-dai = <&q6afedai INT_BT_SCO_RX>;
++		};
++		platform {
++			sound-dai = <&q6routing>;
++		};
++		codec {
++			sound-dai = <&bt_sco 1>;
++		};
++	};
++
++	sound_link_backend3: backend3-dai-link {
++		link-name = "Internal BT-SCO Capture";
++
++		cpu {
++			sound-dai = <&q6afedai INT_BT_SCO_TX>;
++		};
++		platform {
++			sound-dai = <&q6routing>;
++		};
++		codec {
++			sound-dai = <&bt_sco 1>;
++		};
++	};
+ };
+ 
+ &usb {
