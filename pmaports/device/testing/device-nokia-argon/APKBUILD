@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-nokia-argon
 pkgdesc="Nokia 8110 4G"
 pkgver=10
-pkgrel=6
+pkgrel=7
 url="https://postmarketos.org"
 license="GPL-2.0-only"
 arch="armv7"
@@ -18,15 +18,22 @@ depends="
 	soc-qcom-msm8909
 	soc-qcom-msm8916-rproc
 "
-subpackages="$pkgname-nonfree-firmware:nonfree_firmware"
+subpackages="
+	$pkgname-nonfree-firmware:nonfree_firmware
+	$pkgname-foot
+"
 makedepends="devicepkg-dev mipi-dbi-cmd"
 _panel="nokia,argon-gc9305-v2-panel"
 source="
 	00-nokia-argon-display.files
+	61-nokia-argon-keypad.hwdb
 	deviceinfo
+	foot.ini
 	kernel-cmdline.conf
 	modules-initfs
 	nokia-argon-modules.conf
+	nokia-argon-sway.conf
+	sxmo_deviceprofile_nokia,argon.sh
 	$_panel.txt
 "
 
@@ -46,6 +53,19 @@ package() {
 			"$pkgdir"/usr/share/mkinitfs/files/
 	install -Dm644 "$srcdir"/nokia-argon-modules.conf \
 			"$pkgdir"/etc/modules-load.d/nokia-argon.conf
+	install -Dm644 "$srcdir"/61-nokia-argon-keypad.hwdb \
+			"$pkgdir"/usr/lib/udev/hwdb.d/61-nokia-argon-keypad.hwdb
+	install -Dm644 "$srcdir"/nokia-argon-sway.conf \
+			"$pkgdir"/etc/sway/config.d/nokia-argon.conf
+	install -Dm755 "$srcdir"/sxmo_deviceprofile_nokia,argon.sh \
+			"$pkgdir"/usr/bin/sxmo_deviceprofile_nokia,argon.sh
+}
+
+foot() {
+	install_if="$pkgname=$pkgver-r$pkgrel foot"
+	replaces="foot"
+	install -Dm644 "$srcdir"/foot.ini \
+			"$subpkgdir"/etc/xdg/foot/foot.ini
 }
 
 nonfree_firmware() {
@@ -61,9 +81,13 @@ nonfree_firmware() {
 
 sha512sums="
 66302bb5d83c4ba155ff62405fb9a374ab76e1912411310b1ad75e00c216b6868da4e2b6f3987c97146389aa44b2b2c26f0ca0819566be45c9d0d2dd1d3b72f1  00-nokia-argon-display.files
+3945c6efee6e111f4113f6b26448699520bc5e3975ab15b13b56f2701f4c7f04607fad0670e4f21e5d4ffc7ea2e60242eaa042b7f05fc966380ec7964011d9ab  61-nokia-argon-keypad.hwdb
 ef4587f749b941761cb7838d9e21e0bd9436693a4a8bd38ac5d7cae6e9ceb2c1e7358d5fe9a34b23d6ff484c81079533eaee6c3e609d8bc685902ff150e1e79d  deviceinfo
+4ef1b238cdd5eca3ad9aacf40d173ac3244542cc1061d66f2233aa689701278cf748446b84bbd964a68ad414e6a27d7e9012bb6a93724abfda1af5888db71231  foot.ini
 37e1e5f8839b624ab3eb850a24ed4daeb61a651257a1fb593f49cb869323e5d1b339c831a18eb26a9d7bd0a618ea9eb2bb9bf3882133af5f2606a878e6d39c67  kernel-cmdline.conf
 749fa5911f53f65c1a18a8768d374d1ea39ef47ed61146a5f79d669250788501434a059cfff65b83cb54eb7273841686b4a3a04f20aaec6ec7f742e14623c8bc  modules-initfs
 84ee365ae62b58d3e365829f259fe51aae5ecbbcfc49005db3174d3cf767076457834baf91690786364279bda8949ff5fd81905c02f5a5ab13772db4999c405b  nokia-argon-modules.conf
+d48fd41e9ae425075e9d53add7b0e56acd69cc421515b5fc5e48ea9f1a63c976b3ad824ab4999215c090669a6d809091572e13d4b652663964a2344acc4a47df  nokia-argon-sway.conf
+1e1a8954dc333dace6d687cae256f24ab2e84d10f675e49eb05a2476c49c3a7229f2708f9c4f50a911757315a6d3509500c3bed70c7509fe4cb28ae10b238138  sxmo_deviceprofile_nokia,argon.sh
 dd82fd4732694a24c91339b5c5fbb0bf485b3b2da3c17c11b72a02e90e9827c367504c99894556dd8273f927408cdb187325e5f3b9ea9e4a82e3cb3798cb2816  nokia,argon-gc9305-v2-panel.txt
 "

@@ -6,11 +6,14 @@
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
 #include <glib-unix.h>
+#include <linux/input.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -32,6 +35,20 @@ struct bt_sockaddr_sco {
 #define HFP_HF_UUID "0000111e-0000-1000-8000-00805f9b34fb"
 #define PROFILE_OBJ_PATH "/org/nokia/BtHfpProfile"
 #define AT_QUEUE_SIZE 24
+
+#define LOG(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
+
+static const char *const output_names[] = {
+	[OUTPUT_EARPIECE] = "earpiece",
+	[OUTPUT_SPEAKER] = "speaker",
+	[OUTPUT_HEADPHONES] = "headphones",
+};
+
+static const char *const mic_names[] = {
+	[MIC_AMIC1] = "amic1",
+	[MIC_AMIC3] = "amic3",
+	[MIC_DUAL] = "dual",
+};
 
 static const char profile_xml[] =
 	"<node>"
@@ -64,7 +81,6 @@ struct hfp_app {
 
 	struct alsa_bridge *bridge;
 	char ctl_sock_path[256];
-	char state_path[256];
 
 	int ctl_listen_fd;
 	guint ctl_watch_id;
@@ -96,87 +112,29 @@ struct hfp_app {
 	int val_callsetup;
 	int val_callheld;
 	char caller_id[64];
+
+	int jack_fd;
+	guint jack_watch_id;
+	enum hfp_output_mode saved_output_mode;
 };
 
 static void pump_at_queue(struct hfp_app *app);
 
-static void get_runtime_paths(char *sock_out, size_t sock_sz, char *state_out,
-			      size_t state_sz)
+static int lookup_name(const char *const *tbl, size_t n, const char *s)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (strcmp(tbl[i], s) == 0)
+			return (int)i;
+	}
+	return -1;
+}
+
+static void get_ctl_sock_path(char *out, size_t sz)
 {
 	const char *xdg = getenv("XDG_RUNTIME_DIR");
-	char base[128];
 
-	if (xdg && xdg[0]) {
-		snprintf(base, sizeof(base), "%s", xdg);
-	} else {
-		snprintf(base, sizeof(base), "/tmp");
-	}
-	snprintf(sock_out, sock_sz, "%s/nokia-bt-hfp.sock", base);
-	snprintf(state_out, state_sz, "%s/nokia-bt-hfp.state", base);
-}
-
-static const char *output_mode_str(enum hfp_output_mode m)
-{
-	switch (m) {
-	case OUTPUT_SPEAKER:
-		return "speaker";
-	case OUTPUT_HEADPHONES:
-		return "headphones";
-	default:
-		return "earpiece";
-	}
-}
-
-static const char *mic_source_str(enum hfp_mic_source m)
-{
-	switch (m) {
-	case MIC_AMIC3:
-		return "amic3";
-	case MIC_DUAL:
-		return "dual";
-	default:
-		return "amic1";
-	}
-}
-
-static void write_state_file(struct hfp_app *app)
-{
-	struct alsa_bridge_cfg cfg;
-	char tmp_path[280];
-	FILE *f;
-
-	alsa_bridge_get_cfg(app->bridge, &cfg);
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", app->state_path);
-	f = fopen(tmp_path, "w");
-	if (!f)
-		return;
-	fprintf(f,
-		"connected=%d\n"
-		"slc_ready=%d\n"
-		"sco_active=%d\n"
-		"bridge_running=%d\n"
-		"peer=%s\n"
-		"call=%d\n"
-		"callsetup=%d\n"
-		"callheld=%d\n"
-		"caller_id=%s\n"
-		"output=%s\n"
-		"mic=%s\n"
-		"vgs=%d\n"
-		"vgm=%d\n"
-		"muted=%d\n"
-		"aec=%d\n"
-		"ns=%d\n",
-		app->rfcomm_fd >= 0 ? 1 : 0, app->slc_ready ? 1 : 0,
-		app->sco_fd >= 0 ? 1 : 0,
-		alsa_bridge_is_running(app->bridge) ? 1 : 0, app->peer_addr,
-		app->val_call, app->val_callsetup, app->val_callheld,
-		app->caller_id, output_mode_str(cfg.output_mode),
-		mic_source_str(cfg.mic_source), cfg.vgs_level, cfg.vgm_level,
-		cfg.muted ? 1 : 0, cfg.enable_aec ? 1 : 0,
-		cfg.enable_ns ? 1 : 0);
-	fclose(f);
-	rename(tmp_path, app->state_path);
+	snprintf(out, sz, "%s/nokia-bt-hfp.sock",
+		 (xdg && xdg[0]) ? xdg : "/tmp");
 }
 
 static void run_call_hook(struct hfp_app *app, const char *event)
@@ -186,8 +144,7 @@ static void run_call_hook(struct hfp_app *app, const char *event)
 	struct stat st;
 
 	if (home && home[0]) {
-		snprintf(hook, sizeof(hook), "%s/.config/nokia-bt-hfp/hook",
-			 home);
+		snprintf(hook, sizeof(hook), "%s/.config/nokia-bt-hfp/hook", home);
 		if (stat(hook, &st) == 0 && (st.st_mode & S_IXUSR)) {
 			char *argv[] = { hook, (char *)event, app->peer_addr,
 					 app->caller_id, NULL };
@@ -196,12 +153,11 @@ static void run_call_hook(struct hfp_app *app, const char *event)
 		}
 	}
 	if (strcmp(event, "incoming") == 0) {
-		const char *who = app->caller_id[0] ? app->caller_id
-						    : app->peer_addr;
+		const char *who = app->caller_id[0] ? app->caller_id : app->peer_addr;
 		char *argv[] = { "notify-send", "-u", "critical",
 				 "Incoming Bluetooth Call", (char *)who, NULL };
-		g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL,
-			      NULL, NULL);
+		g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+			      NULL, NULL, NULL, NULL);
 	}
 }
 
@@ -211,8 +167,7 @@ static gboolean on_at_timeout(gpointer user_data)
 
 	app->at_timeout_id = 0;
 	if (app->at_inflight) {
-		fprintf(stderr, "[hfp] AT timeout waiting for response to: %s\n",
-			app->at_current);
+		LOG("[hfp] AT timeout waiting for response to: %s", app->at_current);
 		app->at_inflight = false;
 		pump_at_queue(app);
 	}
@@ -225,9 +180,7 @@ static void pump_at_queue(struct hfp_app *app)
 	size_t len;
 	ssize_t w;
 
-	if (app->rfcomm_fd < 0 || app->at_inflight)
-		return;
-	if (app->at_head == app->at_tail)
+	if (app->rfcomm_fd < 0 || app->at_inflight || app->at_head == app->at_tail)
 		return;
 
 	snprintf(app->at_current, sizeof(app->at_current), "%s",
@@ -237,15 +190,15 @@ static void pump_at_queue(struct hfp_app *app)
 	len = (size_t)snprintf(wire, sizeof(wire), "%s\r", app->at_current);
 	w = write(app->rfcomm_fd, wire, len);
 	if (w != (ssize_t)len)
-		fprintf(stderr, "[hfp] RFCOMM write '%s' failed: %s\n",
-			app->at_current, w < 0 ? strerror(errno) : "short write");
+		LOG("[hfp] RFCOMM write '%s' failed: %s", app->at_current,
+		    w < 0 ? strerror(errno) : "short write");
 
 	/* Arm the timeout even on failure so the queue keeps draining */
 	app->at_inflight = true;
 	if (app->at_timeout_id)
 		g_source_remove(app->at_timeout_id);
 	app->at_timeout_id = g_timeout_add_seconds(3, on_at_timeout, app);
-	fprintf(stderr, "[hfp TX] %s\n", app->at_current);
+	LOG("[hfp TX] %s", app->at_current);
 }
 
 static void queue_at(struct hfp_app *app, const char *cmd)
@@ -253,7 +206,7 @@ static void queue_at(struct hfp_app *app, const char *cmd)
 	int next = (app->at_tail + 1) % AT_QUEUE_SIZE;
 
 	if (next == app->at_head) {
-		fprintf(stderr, "[hfp] AT queue full, dropping '%s'\n", cmd);
+		LOG("[hfp] AT queue full, dropping '%s'", cmd);
 		return;
 	}
 	snprintf(app->at_queue[app->at_tail],
@@ -293,8 +246,8 @@ static void parse_cind_map(struct hfp_app *app, const char *line)
 		idx++;
 		p = q2 + 1;
 	}
-	fprintf(stderr, "[hfp] CIND map: call=%d callsetup=%d callheld=%d\n",
-		app->cind.call, app->cind.callsetup, app->cind.callheld);
+	LOG("[hfp] CIND map: call=%d callsetup=%d callheld=%d",
+	    app->cind.call, app->cind.callsetup, app->cind.callheld);
 }
 
 static void apply_indicator(struct hfp_app *app, int idx, int val)
@@ -326,12 +279,12 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 {
 	if (!line[0])
 		return;
-	fprintf(stderr, "[hfp RX] %s\n", line);
+	LOG("[hfp RX] %s", line);
 
 	if (strncmp(line, "+BRSF:", 6) == 0) {
 		app->ag_features = (unsigned int)strtoul(line + 6, NULL, 10);
-		fprintf(stderr, "[hfp] AG features=0x%x (codec_neg=%d)\n",
-			app->ag_features, (app->ag_features & (1U << 9)) ? 1 : 0);
+		LOG("[hfp] AG features=0x%x (codec_neg=%d)", app->ag_features,
+		    (app->ag_features & (1U << 9)) ? 1 : 0);
 	} else if (strncmp(line, "+CIND:", 6) == 0) {
 		const char *rest = line + 6;
 		while (*rest == ' ')
@@ -359,10 +312,7 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 			apply_indicator(app, idx, val);
 	} else if (strncmp(line, "+BCS:", 5) == 0) {
 		/* Only CVSD (1) is usable over INT_BT_SCO 8 kHz; re-advertise otherwise */
-		if (atoi(line + 5) == 1)
-			queue_at(app, "AT+BCS=1");
-		else
-			queue_at(app, "AT+BAC=1");
+		queue_at(app, atoi(line + 5) == 1 ? "AT+BCS=1" : "AT+BAC=1");
 	} else if (strncmp(line, "+CLIP:", 6) == 0) {
 		const char *q1 = strchr(line + 6, '"');
 		const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
@@ -374,11 +324,9 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 			app->caller_id[n] = '\0';
 		}
 	} else if (strncmp(line, "+VGS:", 5) == 0) {
-		int v = atoi(line + 5);
-		alsa_bridge_set_vgs(app->bridge, v);
+		alsa_bridge_set_vgs(app->bridge, atoi(line + 5));
 	} else if (strncmp(line, "+VGM:", 5) == 0) {
-		int v = atoi(line + 5);
-		alsa_bridge_set_vgm(app->bridge, v);
+		alsa_bridge_set_vgm(app->bridge, atoi(line + 5));
 	} else if (strcmp(line, "RING") == 0) {
 		/* callsetup state is driven by +CIEV only, so "incoming" fires reliably */
 		run_call_hook(app, "ring");
@@ -409,16 +357,25 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 				queue_at(app, at);
 				snprintf(at, sizeof(at), "AT+VGM=%d", cfg.vgm_level);
 				queue_at(app, at);
-			} else if (strncmp(app->at_current, "AT+CMER=", 8) == 0 &&
-				   ok) {
+			} else if (strncmp(app->at_current, "AT+CMER=", 8) == 0 && ok) {
 				app->slc_ready = true;
-				fprintf(stderr, "[hfp] SLC established\n");
+				LOG("[hfp] SLC established");
 			}
 			app->at_inflight = false;
 			pump_at_queue(app);
 		}
 	}
-	write_state_file(app);
+}
+
+static guint watch_fd(int fd, GIOCondition cond, GIOFunc cb, gpointer data)
+{
+	GIOChannel *ch = g_io_channel_unix_new(fd);
+	guint id;
+
+	g_io_channel_set_close_on_unref(ch, FALSE);
+	id = g_io_add_watch(ch, cond, cb, data);
+	g_io_channel_unref(ch);
+	return id;
 }
 
 static void close_sco(struct hfp_app *app)
@@ -432,7 +389,6 @@ static void close_sco(struct hfp_app *app)
 		app->sco_fd = -1;
 	}
 	alsa_bridge_stop(app->bridge);
-	write_state_file(app);
 }
 
 static void close_rfcomm(struct hfp_app *app)
@@ -454,23 +410,17 @@ static void close_rfcomm(struct hfp_app *app)
 	app->at_head = app->at_tail = 0;
 	app->at_inflight = false;
 	app->slc_ready = false;
-	app->val_call = 0;
-	app->val_callsetup = 0;
-	app->val_callheld = 0;
-	app->device_path[0] = '\0';
-	app->peer_addr[0] = '\0';
-	app->caller_id[0] = '\0';
-	write_state_file(app);
+	app->val_call = app->val_callsetup = app->val_callheld = 0;
+	app->device_path[0] = app->peer_addr[0] = app->caller_id[0] = '\0';
 }
 
-static gboolean on_rfcomm_io(GIOChannel *src, GIOCondition cond,
-			     gpointer user_data)
+static gboolean on_rfcomm_io(GIOChannel *src, GIOCondition cond, gpointer user_data)
 {
 	struct hfp_app *app = user_data;
 	int fd = g_io_channel_unix_get_fd(src);
 
 	if (cond & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) {
-		fprintf(stderr, "[hfp] RFCOMM disconnected\n");
+		LOG("[hfp] RFCOMM disconnected");
 		close_rfcomm(app);
 		return G_SOURCE_REMOVE;
 	}
@@ -481,8 +431,8 @@ static gboolean on_rfcomm_io(GIOChannel *src, GIOCondition cond,
 		if (n <= 0) {
 			if (n < 0 && (errno == EAGAIN || errno == EINTR))
 				return G_SOURCE_CONTINUE;
-			fprintf(stderr, "[hfp] RFCOMM EOF/read err: %s\n",
-				n == 0 ? "EOF" : strerror(errno));
+			LOG("[hfp] RFCOMM EOF/read err: %s",
+			    n == 0 ? "EOF" : strerror(errno));
 			close_rfcomm(app);
 			return G_SOURCE_REMOVE;
 		}
@@ -494,8 +444,7 @@ static gboolean on_rfcomm_io(GIOChannel *src, GIOCondition cond,
 			if (app->rx_buf[i] == '\r' || app->rx_buf[i] == '\n') {
 				app->rx_buf[i] = '\0';
 				if (i > start)
-					handle_at_line(app,
-						       app->rx_buf + start);
+					handle_at_line(app, app->rx_buf + start);
 				start = i + 1;
 			}
 		}
@@ -510,8 +459,7 @@ static gboolean on_rfcomm_io(GIOChannel *src, GIOCondition cond,
 	return G_SOURCE_CONTINUE;
 }
 
-static gboolean on_sco_conn_io(GIOChannel *src, GIOCondition cond,
-			       gpointer user_data)
+static gboolean on_sco_conn_io(GIOChannel *src, GIOCondition cond, gpointer user_data)
 {
 	struct hfp_app *app = user_data;
 	int fd = g_io_channel_unix_get_fd(src);
@@ -520,13 +468,13 @@ static gboolean on_sco_conn_io(GIOChannel *src, GIOCondition cond,
 		uint8_t discard[256];
 		ssize_t n = recv(fd, discard, sizeof(discard), MSG_DONTWAIT);
 		if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-			fprintf(stderr, "[sco] connection closed\n");
+			LOG("[sco] connection closed");
 			close_sco(app);
 			return G_SOURCE_REMOVE;
 		}
 	}
 	if (cond & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) {
-		fprintf(stderr, "[sco] connection HUP/ERR\n");
+		LOG("[sco] connection HUP/ERR");
 		close_sco(app);
 		return G_SOURCE_REMOVE;
 	}
@@ -535,47 +483,36 @@ static gboolean on_sco_conn_io(GIOChannel *src, GIOCondition cond,
 
 static void attach_sco_fd(struct hfp_app *app, int fd)
 {
-	GIOChannel *ch;
-
 	close_sco(app);
 	app->sco_fd = fd;
-	ch = g_io_channel_unix_new(fd);
-	g_io_channel_set_close_on_unref(ch, FALSE);
-	app->sco_watch_id = g_io_add_watch(
-		ch, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, on_sco_conn_io,
-		app);
-	g_io_channel_unref(ch);
-
+	app->sco_watch_id = watch_fd(
+		fd, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, on_sco_conn_io, app);
 	if (alsa_bridge_start(app->bridge) < 0)
-		fprintf(stderr, "[sco] failed to start ALSA INT_BT_SCO bridge\n");
-	write_state_file(app);
+		LOG("[sco] failed to start ALSA INT_BT_SCO bridge");
 }
 
-static gboolean on_sco_accept(GIOChannel *src, GIOCondition cond,
-			      gpointer user_data)
+static gboolean on_sco_accept(GIOChannel *src, GIOCondition cond, gpointer user_data)
 {
 	struct hfp_app *app = user_data;
-	int lfd = g_io_channel_unix_get_fd(src);
 	struct bt_sockaddr_sco peer;
 	socklen_t plen = sizeof(peer);
 	int cfd;
 
-	if (cond & (G_IO_ERR | G_IO_NVAL))
+	if (cond & (G_IO_ERR | G_IO_NVAL)) {
+		app->sco_listen_watch_id = 0;
 		return G_SOURCE_REMOVE;
+	}
 
-	cfd = accept(lfd, (struct sockaddr *)&peer, &plen);
+	cfd = accept(g_io_channel_unix_get_fd(src), (struct sockaddr *)&peer, &plen);
 	if (cfd < 0) {
 		if (errno != EAGAIN && errno != EINTR)
-			fprintf(stderr, "[sco] accept failed: %s\n",
-				strerror(errno));
+			LOG("[sco] accept failed: %s", strerror(errno));
 		return G_SOURCE_CONTINUE;
 	}
 
-	fprintf(stderr,
-		"[sco] accepted incoming eSCO from %02X:%02X:%02X:%02X:%02X:%02X (fd=%d)\n",
-		peer.sco_bdaddr[5], peer.sco_bdaddr[4], peer.sco_bdaddr[3],
-		peer.sco_bdaddr[2], peer.sco_bdaddr[1], peer.sco_bdaddr[0],
-		cfd);
+	LOG("[sco] accepted incoming eSCO from %02X:%02X:%02X:%02X:%02X:%02X (fd=%d)",
+	    peer.sco_bdaddr[5], peer.sco_bdaddr[4], peer.sco_bdaddr[3],
+	    peer.sco_bdaddr[2], peer.sco_bdaddr[1], peer.sco_bdaddr[0], cfd);
 	/* Keep SCO fd open without writing to avoid btqcomsmd -EILSEQ (-84) */
 	attach_sco_fd(app, cfd);
 	return G_SOURCE_CONTINUE;
@@ -583,38 +520,25 @@ static gboolean on_sco_accept(GIOChannel *src, GIOCondition cond,
 
 static int setup_sco_listener(struct hfp_app *app)
 {
-	struct bt_sockaddr_sco addr;
-	GIOChannel *ch;
-	int fd;
+	struct bt_sockaddr_sco addr = { .sco_family = AF_BLUETOOTH };
+	int fd = socket(AF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
+			BTPROTO_SCO);
 
-	fd = socket(AF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC,
-		    BTPROTO_SCO);
 	if (fd < 0) {
-		fprintf(stderr, "[sco] socket(BTPROTO_SCO) failed: %s\n",
-			strerror(errno));
+		LOG("[sco] socket(BTPROTO_SCO) failed: %s", strerror(errno));
 		return -errno;
 	}
-
-	memset(&addr, 0, sizeof(addr));
-	addr.sco_family = AF_BLUETOOTH;
-	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		fprintf(stderr, "[sco] bind failed: %s\n", strerror(errno));
-		close(fd);
-		return -errno;
-	}
-	if (listen(fd, 4) < 0) {
-		fprintf(stderr, "[sco] listen failed: %s\n", strerror(errno));
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+	    listen(fd, 4) < 0) {
+		LOG("[sco] bind/listen failed: %s", strerror(errno));
 		close(fd);
 		return -errno;
 	}
 
 	app->sco_listen_fd = fd;
-	ch = g_io_channel_unix_new(fd);
-	g_io_channel_set_close_on_unref(ch, FALSE);
-	app->sco_listen_watch_id = g_io_add_watch(
-		ch, G_IO_IN | G_IO_ERR | G_IO_NVAL, on_sco_accept, app);
-	g_io_channel_unref(ch);
-	fprintf(stderr, "[sco] listening on BTPROTO_SCO\n");
+	app->sco_listen_watch_id =
+		watch_fd(fd, G_IO_IN | G_IO_ERR | G_IO_NVAL, on_sco_accept, app);
+	LOG("[sco] listening on BTPROTO_SCO");
 	return 0;
 }
 
@@ -636,10 +560,8 @@ static void extract_mac_from_dev_path(const char *path, char *out, size_t sz)
 }
 
 static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
-				  const gchar *obj_path,
-				  const gchar *iface_name,
-				  const gchar *method_name,
-				  GVariant *parameters,
+				  const gchar *obj_path, const gchar *iface_name,
+				  const gchar *method_name, GVariant *parameters,
 				  GDBusMethodInvocation *invocation,
 				  gpointer user_data)
 {
@@ -650,14 +572,13 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 	(void)iface_name;
 
 	if (strcmp(method_name, "Release") == 0) {
-		fprintf(stderr, "[bluez] Profile1.Release called\n");
+		LOG("[bluez] Profile1.Release called");
 		close_rfcomm(app);
 		g_dbus_method_invocation_return_value(invocation, NULL);
 	} else if (strcmp(method_name, "RequestDisconnection") == 0) {
 		const gchar *dev = NULL;
 		g_variant_get(parameters, "(&o)", &dev);
-		fprintf(stderr, "[bluez] RequestDisconnection(%s)\n",
-			dev ? dev : "");
+		LOG("[bluez] RequestDisconnection(%s)", dev ? dev : "");
 		close_rfcomm(app);
 		g_dbus_method_invocation_return_value(invocation, NULL);
 	} else if (strcmp(method_name, "NewConnection") == 0) {
@@ -667,8 +588,7 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 		GDBusMessage *msg = g_dbus_method_invocation_get_message(invocation);
 		GUnixFDList *fd_list = g_dbus_message_get_unix_fd_list(msg);
 		GError *err = NULL;
-		GIOChannel *ch;
-		int fd;
+		int fd, flags;
 
 		g_variant_get(parameters, "(&oh@a{sv})", &dev, &fd_idx, &props);
 		if (props)
@@ -694,24 +614,19 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 		extract_mac_from_dev_path(app->device_path, app->peer_addr,
 					  sizeof(app->peer_addr));
 
-		int flags = fcntl(fd, F_GETFL, 0);
-		if (flags >= 0)
+		if ((flags = fcntl(fd, F_GETFL, 0)) >= 0)
 			fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
-		ch = g_io_channel_unix_new(fd);
-		g_io_channel_set_close_on_unref(ch, FALSE);
-		app->rfcomm_watch_id = g_io_add_watch(
-			ch, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
+		app->rfcomm_watch_id = watch_fd(
+			fd, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
 			on_rfcomm_io, app);
-		g_io_channel_unref(ch);
 
-		fprintf(stderr, "[bluez] NewConnection dev=%s peer=%s fd=%d\n",
-			app->device_path, app->peer_addr, fd);
+		LOG("[bluez] NewConnection dev=%s peer=%s fd=%d",
+		    app->device_path, app->peer_addr, fd);
 		g_dbus_method_invocation_return_value(invocation, NULL);
 
 		/* Initiate HFP 1.7 SLC: bits 0|1|2|4|5|7 = 183 */
 		queue_at(app, "AT+BRSF=183");
-		write_state_file(app);
 	}
 }
 
@@ -722,14 +637,10 @@ static void register_bluez_profile(struct hfp_app *app)
 	GError *err = NULL;
 
 	g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
-	g_variant_builder_add(&b, "{sv}", "Name",
-			      g_variant_new_string("Handsfree"));
-	g_variant_builder_add(&b, "{sv}", "AutoConnect",
-			      g_variant_new_boolean(TRUE));
-	g_variant_builder_add(&b, "{sv}", "Version",
-			      g_variant_new_uint16(0x0107));
-	g_variant_builder_add(&b, "{sv}", "Features",
-			      g_variant_new_uint16(0x0017));
+	g_variant_builder_add(&b, "{sv}", "Name", g_variant_new_string("Handsfree"));
+	g_variant_builder_add(&b, "{sv}", "AutoConnect", g_variant_new_boolean(TRUE));
+	g_variant_builder_add(&b, "{sv}", "Version", g_variant_new_uint16(0x0107));
+	g_variant_builder_add(&b, "{sv}", "Features", g_variant_new_uint16(0x0017));
 
 	res = g_dbus_connection_call_sync(
 		app->sys_bus, "org.bluez", "/org/bluez",
@@ -738,28 +649,24 @@ static void register_bluez_profile(struct hfp_app *app)
 			      g_variant_builder_end(&b)),
 		NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &err);
 	if (!res) {
-		fprintf(stderr,
-			"[bluez] RegisterProfile failed (is WirePlumber hfp_hf disabled?): %s\n",
-			err ? err->message : "unknown");
+		LOG("[bluez] RegisterProfile failed (is WirePlumber hfp_hf disabled?): %s",
+		    err ? err->message : "unknown");
 		g_clear_error(&err);
 	} else {
 		g_variant_unref(res);
-		fprintf(stderr, "[bluez] Registered HFP-HF profile (%s)\n",
-			HFP_HF_UUID);
+		LOG("[bluez] Registered HFP-HF profile (%s)", HFP_HF_UUID);
 	}
 }
 
-static bool set_adapter_prop(struct hfp_app *app, const char *prop,
-			     GVariant *val)
+static bool set_adapter_prop(struct hfp_app *app, const char *prop, GVariant *val)
 {
-	GVariant *res;
 	GError *err = NULL;
-
-	res = g_dbus_connection_call_sync(
+	GVariant *res = g_dbus_connection_call_sync(
 		app->sys_bus, "org.bluez", "/org/bluez/hci0",
 		"org.freedesktop.DBus.Properties", "Set",
 		g_variant_new("(ssv)", "org.bluez.Adapter1", prop, val), NULL,
 		G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
+
 	if (!res) {
 		g_clear_error(&err);
 		return false;
@@ -770,15 +677,25 @@ static bool set_adapter_prop(struct hfp_app *app, const char *prop,
 
 static bool configure_bluez_adapter(struct hfp_app *app)
 {
-	if (!set_adapter_prop(app, "Powered", g_variant_new_boolean(TRUE)))
+	const struct {
+		const char *prop;
+		GVariant *val;
+	} props[] = {
+		{ "Alias", g_variant_new_string("nokia-argon") },
+		{ "PairableTimeout", g_variant_new_uint32(0) },
+		{ "Pairable", g_variant_new_boolean(TRUE) },
+		{ "DiscoverableTimeout", g_variant_new_uint32(0) },
+		{ "Discoverable", g_variant_new_boolean(TRUE) },
+	};
+
+	if (!set_adapter_prop(app, "Powered", g_variant_new_boolean(TRUE))) {
+		for (size_t i = 0; i < G_N_ELEMENTS(props); i++)
+			g_variant_unref(g_variant_ref_sink(props[i].val));
 		return false;
-	set_adapter_prop(app, "Alias", g_variant_new_string("nokia-argon"));
-	set_adapter_prop(app, "PairableTimeout", g_variant_new_uint32(0));
-	set_adapter_prop(app, "Pairable", g_variant_new_boolean(TRUE));
-	set_adapter_prop(app, "DiscoverableTimeout", g_variant_new_uint32(0));
-	set_adapter_prop(app, "Discoverable", g_variant_new_boolean(TRUE));
-	fprintf(stderr,
-		"[bluez] Configured hci0 (Alias=nokia-argon, Powered=1, Discoverable=1, Pairable=1)\n");
+	}
+	for (size_t i = 0; i < G_N_ELEMENTS(props); i++)
+		set_adapter_prop(app, props[i].prop, props[i].val);
+	LOG("[bluez] Configured hci0 (Alias=nokia-argon, Powered=1, Discoverable=1, Pairable=1)");
 	return true;
 }
 
@@ -824,8 +741,18 @@ static void on_bluez_vanished(GDBusConnection *conn, const gchar *name,
 static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply,
 			   size_t reply_sz)
 {
+	static const struct {
+		const char *cmd;
+		const char *at;
+	} at_cmds[] = {
+		{ "answer", "ATA" },
+		{ "hangup", "AT+CHUP" },
+		{ "redial", "AT+BLDN" },
+		{ "sco-open", "AT+BCC" },
+	};
 	char cmd[256];
 	char *arg;
+	int idx;
 
 	snprintf(cmd, sizeof(cmd), "%s", cmdline);
 	cmd[strcspn(cmd, "\r\n")] = '\0';
@@ -846,134 +773,97 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 			 app->peer_addr[0] ? app->peer_addr : "-",
 			 app->val_call, app->val_callsetup,
 			 app->caller_id[0] ? app->caller_id : "-",
-			 output_mode_str(cfg.output_mode),
-			 mic_source_str(cfg.mic_source), cfg.vgs_level,
+			 output_names[cfg.output_mode],
+			 mic_names[cfg.mic_source], cfg.vgs_level,
 			 cfg.vgm_level, cfg.muted, cfg.enable_aec,
 			 cfg.enable_ns);
-	} else if (strcmp(cmd, "answer") == 0) {
-		if (app->rfcomm_fd < 0)
-			snprintf(reply, reply_sz, "ERR not connected\n");
-		else {
-			queue_at(app, "ATA");
-			snprintf(reply, reply_sz, "OK ATA\n");
+		return;
+	}
+
+	for (size_t i = 0; i < G_N_ELEMENTS(at_cmds); i++) {
+		if (strcmp(cmd, at_cmds[i].cmd) == 0) {
+			if (app->rfcomm_fd < 0)
+				snprintf(reply, reply_sz, "ERR not connected\n");
+			else {
+				queue_at(app, at_cmds[i].at);
+				snprintf(reply, reply_sz, "OK %s\n", at_cmds[i].at);
+			}
+			return;
 		}
-	} else if (strcmp(cmd, "hangup") == 0) {
-		if (app->rfcomm_fd < 0)
-			snprintf(reply, reply_sz, "ERR not connected\n");
-		else {
-			queue_at(app, "AT+CHUP");
-			snprintf(reply, reply_sz, "OK AT+CHUP\n");
-		}
-	} else if (strcmp(cmd, "redial") == 0) {
-		if (app->rfcomm_fd < 0)
-			snprintf(reply, reply_sz, "ERR not connected\n");
-		else {
-			queue_at(app, "AT+BLDN");
-			snprintf(reply, reply_sz, "OK AT+BLDN\n");
-		}
+	}
+
+	if ((idx = lookup_name(output_names, G_N_ELEMENTS(output_names), cmd)) >= 0) {
+		enum hfp_output_mode mode = (enum hfp_output_mode)idx;
+		if (mode != OUTPUT_HEADPHONES)
+			app->saved_output_mode = mode;
+		alsa_bridge_set_output_mode(app->bridge, mode);
+		snprintf(reply, reply_sz, "OK %s\n", output_names[idx]);
 	} else if (strcmp(cmd, "dial") == 0 && arg && arg[0]) {
 		if (app->rfcomm_fd < 0)
 			snprintf(reply, reply_sz, "ERR not connected\n");
-		else if (arg[strspn(arg, "0123456789*#+")] != '\0' ||
-			 strlen(arg) > 32)
+		else if (arg[strspn(arg, "0123456789*#+")] != '\0' || strlen(arg) > 32)
 			snprintf(reply, reply_sz, "ERR invalid number\n");
 		else {
-			char at[128];
+			char at[64];
 			snprintf(at, sizeof(at), "ATD%s;", arg);
 			queue_at(app, at);
 			snprintf(reply, reply_sz, "OK %s\n", at);
 		}
-	} else if (strcmp(cmd, "sco-open") == 0) {
-		if (app->rfcomm_fd < 0)
-			snprintf(reply, reply_sz, "ERR not connected\n");
-		else {
-			queue_at(app, "AT+BCC");
-			snprintf(reply, reply_sz, "OK AT+BCC\n");
-		}
-	} else if (strcmp(cmd, "earpiece") == 0) {
-		alsa_bridge_set_output_mode(app->bridge, OUTPUT_EARPIECE);
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK earpiece\n");
-	} else if (strcmp(cmd, "speaker") == 0) {
-		alsa_bridge_set_output_mode(app->bridge, OUTPUT_SPEAKER);
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK speaker\n");
-	} else if (strcmp(cmd, "headphones") == 0) {
-		alsa_bridge_set_output_mode(app->bridge, OUTPUT_HEADPHONES);
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK headphones\n");
 	} else if (strcmp(cmd, "mic") == 0 && arg) {
-		if (strcmp(arg, "amic1") == 0)
-			alsa_bridge_set_mic_source(app->bridge, MIC_AMIC1);
-		else if (strcmp(arg, "amic3") == 0)
-			alsa_bridge_set_mic_source(app->bridge, MIC_AMIC3);
+		idx = lookup_name(mic_names, G_N_ELEMENTS(mic_names), arg);
+		if (idx < 0)
+			idx = MIC_DUAL;
+		alsa_bridge_set_mic_source(app->bridge, (enum hfp_mic_source)idx);
+		snprintf(reply, reply_sz, "OK mic %s\n", mic_names[idx]);
+	} else if (strcmp(cmd, "mute") == 0 || strcmp(cmd, "unmute") == 0) {
+		bool m = (cmd[0] == 'm');
+		alsa_bridge_set_mute(app->bridge, m);
+		snprintf(reply, reply_sz, "OK %s\n", m ? "muted" : "unmuted");
+	} else if ((strcmp(cmd, "vgs") == 0 || strcmp(cmd, "vgm") == 0) && arg) {
+		bool is_vgs = (cmd[2] == 's');
+		int v = atoi(arg);
+		if (is_vgs)
+			alsa_bridge_set_vgs(app->bridge, v);
 		else
-			alsa_bridge_set_mic_source(app->bridge, MIC_DUAL);
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK mic %s\n", arg);
-	} else if (strcmp(cmd, "mute") == 0) {
-		alsa_bridge_set_mute(app->bridge, true);
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK muted\n");
-	} else if (strcmp(cmd, "unmute") == 0) {
-		alsa_bridge_set_mute(app->bridge, false);
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK unmuted\n");
-	} else if (strcmp(cmd, "vgs") == 0 && arg) {
-		int v = atoi(arg);
-		alsa_bridge_set_vgs(app->bridge, v);
+			alsa_bridge_set_vgm(app->bridge, v);
 		if (app->rfcomm_fd >= 0) {
 			char at[32];
-			snprintf(at, sizeof(at), "AT+VGS=%d", v);
+			snprintf(at, sizeof(at), "AT+VG%c=%d", is_vgs ? 'S' : 'M', v);
 			queue_at(app, at);
 		}
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK vgs=%d\n", v);
-	} else if (strcmp(cmd, "vgm") == 0 && arg) {
-		int v = atoi(arg);
-		alsa_bridge_set_vgm(app->bridge, v);
-		if (app->rfcomm_fd >= 0) {
-			char at[32];
-			snprintf(at, sizeof(at), "AT+VGM=%d", v);
-			queue_at(app, at);
-		}
-		write_state_file(app);
-		snprintf(reply, reply_sz, "OK vgm=%d\n", v);
+		snprintf(reply, reply_sz, "OK %s=%d\n", cmd, v);
 	} else if (strcmp(cmd, "dsp") == 0 && arg) {
 		bool aec = strstr(arg, "noaec") == NULL;
 		bool ns = strstr(arg, "nons") == NULL;
 		alsa_bridge_set_dsp(app->bridge, aec, ns);
-		write_state_file(app);
 		snprintf(reply, reply_sz, "OK aec=%d ns=%d\n", aec, ns);
 	} else {
 		snprintf(reply, reply_sz, "ERR unknown command\n");
 	}
 }
 
-static gboolean on_ctl_accept(GIOChannel *src, GIOCondition cond,
-			      gpointer user_data)
+static gboolean on_ctl_accept(GIOChannel *src, GIOCondition cond, gpointer user_data)
 {
 	struct hfp_app *app = user_data;
-	int lfd = g_io_channel_unix_get_fd(src);
+	struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+	char buf[256] = { 0 }, reply[512];
 	int cfd;
-	char buf[256] = {0};
-	char reply[512];
 	ssize_t n;
 
-	if (cond & (G_IO_ERR | G_IO_NVAL))
+	if (cond & (G_IO_ERR | G_IO_NVAL)) {
+		app->ctl_watch_id = 0;
 		return G_SOURCE_REMOVE;
+	}
 
-	cfd = accept(lfd, NULL, NULL);
+	cfd = accept(g_io_channel_unix_get_fd(src), NULL, NULL);
 	if (cfd < 0)
 		return G_SOURCE_CONTINUE;
 
 	/* Never let a silent client block the main loop */
-	struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
 	setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-	n = read(cfd, buf, sizeof(buf) - 1);
-	if (n > 0) {
+	if ((n = read(cfd, buf, sizeof(buf) - 1)) > 0) {
 		buf[n] = '\0';
 		handle_ctl_cmd(app, buf, reply, sizeof(reply));
 		(void)write(cfd, reply, strlen(reply));
@@ -984,8 +874,8 @@ static gboolean on_ctl_accept(GIOChannel *src, GIOCondition cond,
 
 static int setup_ctl_socket(struct hfp_app *app)
 {
-	struct sockaddr_un addr;
-	GIOChannel *ch;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	mode_t old_umask;
 	int fd;
 
 	unlink(app->ctl_sock_path);
@@ -993,11 +883,8 @@ static int setup_ctl_socket(struct hfp_app *app)
 	if (fd < 0)
 		return -errno;
 
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
-	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
-		 app->ctl_sock_path);
-	mode_t old_umask = umask(0077); /* socket owner-only, even under /tmp */
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", app->ctl_sock_path);
+	old_umask = umask(0077); /* socket owner-only, even under /tmp */
 	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
 	    listen(fd, 8) < 0) {
 		umask(old_umask);
@@ -1007,19 +894,82 @@ static int setup_ctl_socket(struct hfp_app *app)
 	umask(old_umask);
 
 	app->ctl_listen_fd = fd;
-	ch = g_io_channel_unix_new(fd);
-	g_io_channel_set_close_on_unref(ch, FALSE);
-	app->ctl_watch_id = g_io_add_watch(
-		ch, G_IO_IN | G_IO_ERR | G_IO_NVAL, on_ctl_accept, app);
-	g_io_channel_unref(ch);
+	app->ctl_watch_id =
+		watch_fd(fd, G_IO_IN | G_IO_ERR | G_IO_NVAL, on_ctl_accept, app);
 	return 0;
+}
+
+#define JACK_EVDEV_PATH "/dev/input/by-path/platform-7702000.sound-event"
+
+static void apply_jack_state(struct hfp_app *app, bool inserted)
+{
+	struct alsa_bridge_cfg cfg;
+
+	alsa_bridge_get_cfg(app->bridge, &cfg);
+	if (inserted) {
+		if (cfg.output_mode != OUTPUT_HEADPHONES)
+			app->saved_output_mode = cfg.output_mode;
+		alsa_bridge_set_output_mode(app->bridge, OUTPUT_HEADPHONES);
+		LOG("[jack] wired headset plugged in -> output=headphones");
+	} else if (cfg.output_mode == OUTPUT_HEADPHONES) {
+		alsa_bridge_set_output_mode(app->bridge, app->saved_output_mode);
+		LOG("[jack] wired headset unplugged -> output=%s",
+		    output_names[app->saved_output_mode]);
+	}
+}
+
+static gboolean on_jack_io(GIOChannel *src, GIOCondition cond, gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	int fd = g_io_channel_unix_get_fd(src);
+	struct input_event ev;
+
+	if (cond & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) {
+		app->jack_watch_id = 0;
+		return G_SOURCE_REMOVE;
+	}
+
+	while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+		if (ev.type == EV_SW && ev.code == SW_HEADPHONE_INSERT) {
+			apply_jack_state(app, ev.value != 0);
+		} else if (ev.type == EV_KEY && ev.code == KEY_MEDIA && ev.value == 1) {
+			if (app->rfcomm_fd >= 0) {
+				if (app->val_callsetup == 1)
+					queue_at(app, "ATA");
+				else if (app->val_call == 1 || app->val_callsetup > 1)
+					queue_at(app, "AT+CHUP");
+			}
+		}
+	}
+	return G_SOURCE_CONTINUE;
+}
+
+static void setup_jack_listener(struct hfp_app *app)
+{
+	unsigned long sw_bits[(SW_MAX + 8 * sizeof(unsigned long)) / (8 * sizeof(unsigned long))] = { 0 };
+	int fd = open(JACK_EVDEV_PATH, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+
+	if (fd < 0) {
+		LOG("[jack] open %s failed: %s", JACK_EVDEV_PATH, strerror(errno));
+		return;
+	}
+	app->jack_fd = fd;
+	app->jack_watch_id =
+		watch_fd(fd, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, on_jack_io, app);
+
+	if (ioctl(fd, EVIOCGSW(sizeof(sw_bits)), sw_bits) >= 0) {
+		bool inserted = (sw_bits[SW_HEADPHONE_INSERT / (8 * sizeof(unsigned long))] >>
+				 (SW_HEADPHONE_INSERT % (8 * sizeof(unsigned long)))) & 1UL;
+		if (inserted)
+			apply_jack_state(app, true);
+	}
+	LOG("[jack] monitoring wired headset jack on %s", JACK_EVDEV_PATH);
 }
 
 static int send_ctl_cli(const char *sock_path, int argc, char **argv, int start)
 {
-	struct sockaddr_un addr;
-	char cmd[256] = {0};
-	char buf[512];
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	char cmd[256] = { 0 }, buf[512];
 	int fd;
 	ssize_t n;
 
@@ -1035,8 +985,6 @@ static int send_ctl_cli(const char *sock_path, int argc, char **argv, int start)
 		perror("socket");
 		return 1;
 	}
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", sock_path);
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
 		perror("connect nokia-bt-hfp");
@@ -1060,8 +1008,13 @@ static gboolean on_quit_signal(gpointer user_data)
 
 int main(int argc, char **argv)
 {
-	struct hfp_app app;
-	int ret = 1;
+	struct hfp_app app = {
+		.rfcomm_fd = -1,
+		.sco_fd = -1,
+		.sco_listen_fd = -1,
+		.ctl_listen_fd = -1,
+		.jack_fd = -1,
+	};
 	struct alsa_bridge_cfg bcfg = {
 		.output_mode = OUTPUT_EARPIECE,
 		.mic_source = MIC_DUAL,
@@ -1069,40 +1022,25 @@ int main(int argc, char **argv)
 		.vgm_level = 12,
 		.enable_aec = true,
 		.enable_ns = true,
-		.muted = false,
 	};
+	const GDBusInterfaceVTable vtable = { .method_call = handle_profile_method };
 	GDBusNodeInfo *introspection = NULL;
-	const GDBusInterfaceVTable vtable = {
-		.method_call = handle_profile_method,
-	};
 	GError *err = NULL;
+	int ret = 1;
 
-	memset(&app, 0, sizeof(app));
-	app.rfcomm_fd = -1;
-	app.sco_fd = -1;
-	app.sco_listen_fd = -1;
-	app.ctl_listen_fd = -1;
-	get_runtime_paths(app.ctl_sock_path, sizeof(app.ctl_sock_path),
-			  app.state_path, sizeof(app.state_path));
+	get_ctl_sock_path(app.ctl_sock_path, sizeof(app.ctl_sock_path));
 
 	for (int i = 1; i < argc; i++) {
+		int idx;
 		if (strcmp(argv[i], "--ctl") == 0 && i + 1 < argc) {
-			return send_ctl_cli(app.ctl_sock_path, argc, argv,
-					    i + 1);
-		} else if (strcmp(argv[i], "--speaker") == 0) {
-			bcfg.output_mode = OUTPUT_SPEAKER;
-		} else if (strcmp(argv[i], "--earpiece") == 0) {
-			bcfg.output_mode = OUTPUT_EARPIECE;
-		} else if (strcmp(argv[i], "--headphones") == 0) {
-			bcfg.output_mode = OUTPUT_HEADPHONES;
+			return send_ctl_cli(app.ctl_sock_path, argc, argv, i + 1);
+		} else if (strncmp(argv[i], "--", 2) == 0 &&
+			   (idx = lookup_name(output_names, G_N_ELEMENTS(output_names),
+					      argv[i] + 2)) >= 0) {
+			bcfg.output_mode = (enum hfp_output_mode)idx;
 		} else if (strcmp(argv[i], "--mic") == 0 && i + 1 < argc) {
-			i++;
-			if (strcmp(argv[i], "amic1") == 0)
-				bcfg.mic_source = MIC_AMIC1;
-			else if (strcmp(argv[i], "amic3") == 0)
-				bcfg.mic_source = MIC_AMIC3;
-			else
-				bcfg.mic_source = MIC_DUAL;
+			idx = lookup_name(mic_names, G_N_ELEMENTS(mic_names), argv[++i]);
+			bcfg.mic_source = idx >= 0 ? (enum hfp_mic_source)idx : MIC_DUAL;
 		} else if (strcmp(argv[i], "--no-aec") == 0) {
 			bcfg.enable_aec = false;
 		} else if (strcmp(argv[i], "--no-ns") == 0) {
@@ -1110,30 +1048,33 @@ int main(int argc, char **argv)
 		} else if (strcmp(argv[i], "--verbose") == 0) {
 			bcfg.verbose = true;
 		} else {
-			fprintf(stderr,
-				"Usage: %s [--earpiece|--speaker|--headphones] [--mic dual|amic1|amic3] [--no-aec] [--no-ns] [--verbose]\n"
-				"       %s --ctl status|answer|hangup|redial|dial <num>|sco-open|earpiece|speaker|headphones|mic dual|amic1|amic3|mute|unmute|vgs <0-15>|vgm <0-15>\n",
-				argv[0], argv[0]);
+			LOG("Usage: %s [--earpiece|--speaker|--headphones] [--mic dual|amic1|amic3] [--no-aec] [--no-ns] [--verbose]",
+			    argv[0]);
+			LOG("       %s --ctl status|answer|hangup|redial|dial <num>|sco-open|earpiece|speaker|headphones|mic dual|amic1|amic3|mute|unmute|vgs <0-15>|vgm <0-15>",
+			    argv[0]);
 			return 1;
 		}
 	}
 
+	app.saved_output_mode =
+		(bcfg.output_mode == OUTPUT_HEADPHONES) ? OUTPUT_EARPIECE : bcfg.output_mode;
 	app.bridge = alsa_bridge_create(&bcfg);
 	if (!app.bridge) {
-		fprintf(stderr, "Failed to initialize msm8916 ALSA bridge\n");
+		LOG("Failed to initialize msm8916 ALSA bridge");
 		return 1;
 	}
+	setup_jack_listener(&app);
 
 	app.sys_bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
 	if (!app.sys_bus) {
-		fprintf(stderr, "Failed to connect to system D-Bus: %s\n",
-			err ? err->message : "unknown");
+		LOG("Failed to connect to system D-Bus: %s",
+		    err ? err->message : "unknown");
 		goto out;
 	}
 
 	introspection = g_dbus_node_info_new_for_xml(profile_xml, &err);
 	if (!introspection) {
-		fprintf(stderr, "XML error: %s\n", err ? err->message : "unknown");
+		LOG("XML error: %s", err ? err->message : "unknown");
 		goto out;
 	}
 
@@ -1142,15 +1083,14 @@ int main(int argc, char **argv)
 		&vtable, &app, NULL, &err);
 	g_dbus_node_info_unref(introspection);
 	if (app.reg_id == 0) {
-		fprintf(stderr, "Register object failed: %s\n",
-			err ? err->message : "unknown");
+		LOG("Register object failed: %s", err ? err->message : "unknown");
 		goto out;
 	}
 
 	if (setup_sco_listener(&app) < 0)
 		goto out;
 	if (setup_ctl_socket(&app) < 0)
-		fprintf(stderr, "[ctl] failed to bind %s\n", app.ctl_sock_path);
+		LOG("[ctl] failed to bind %s", app.ctl_sock_path);
 
 	app.loop = g_main_loop_new(NULL, FALSE);
 	g_unix_signal_add(SIGINT, on_quit_signal, app.loop);
@@ -1161,11 +1101,9 @@ int main(int argc, char **argv)
 		app.sys_bus, "org.bluez", G_BUS_NAME_WATCHER_FLAGS_NONE,
 		on_bluez_appeared, on_bluez_vanished, &app, NULL);
 
-	write_state_file(&app);
-	fprintf(stderr, "[main] nokia-bt-hfp started (ctl=%s)\n",
-		app.ctl_sock_path);
+	LOG("[main] nokia-bt-hfp started (ctl=%s)", app.ctl_sock_path);
 	g_main_loop_run(app.loop);
-	fprintf(stderr, "[main] shutting down\n");
+	LOG("[main] shutting down");
 	ret = 0;
 
 out:
@@ -1181,7 +1119,10 @@ out:
 		close(app.ctl_listen_fd);
 		unlink(app.ctl_sock_path);
 	}
-	unlink(app.state_path);
+	if (app.jack_watch_id)
+		g_source_remove(app.jack_watch_id);
+	if (app.jack_fd >= 0)
+		close(app.jack_fd);
 	if (app.adapter_timer_id)
 		g_source_remove(app.adapter_timer_id);
 	if (app.bluez_watch_id)

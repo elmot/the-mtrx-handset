@@ -1,0 +1,25 @@
+# Nokia 8110 4G (nokia,argon) matrix keypad (gpio-matrix-keypad)
+# Remap >247 evdev keycodes into <247 range so XKB / Wayland / Sway receive all keys:
+#   row 0, col 0 (0x00): KEY_PICKUP_PHONE  (445) -> f13        (KEY_F13 = 183 / XF86Tools, Green Call key)
+#   row 0, col 4 (0x04): KEY_NUMERIC_STAR  (522) -> kpasterisk (KEY_KPASTERISK = 55, '*' key)
+#   row 2, col 0 (0x10): KEY_KBD_LCD_MENU1 (696) -> menu       (KEY_MENU = 139 / Menu, Left Softkey)
+#   row 2, col 4 (0x14): KEY_NUMERIC_POUND (523) -> f14        (KEY_F14 = 184 / XF86Launch5, '#' key)
+#   row 3, col 2 (0x1a): KEY_KBD_LCD_MENU2 (697) -> esc        (KEY_ESC = 1 / Escape, Right Softkey)
+evdev:name:keypad:dmi:*
+evdev:name:keypad:dt:nokia,argon*
+evdev:input:b0019v0000p0000*
+ KEYBOARD_KEY_00=f13
+ KEYBOARD_KEY_04=kpasterisk
+ KEYBOARD_KEY_10=menu
+ KEYBOARD_KEY_14=f14
+ KEYBOARD_KEY_1a=esc
+ ID_INPUT_KEYBOARD=1
+
+# Ensure gpio-keys (KEY_UP, KEY_BACKSPACE, SW_LID, SW_KEYPAD_SLIDE) and pm8941_resin (KEY_DOWN)
+# are tagged as keyboards for libinput/Sway
+evdev:name:gpio-keys:dt:nokia,argon*
+ ID_INPUT_KEYBOARD=1
+ ID_INPUT_SWITCH=1
+
+evdev:name:pm8941_resin:dt:nokia,argon*
+ ID_INPUT_KEYBOARD=1
