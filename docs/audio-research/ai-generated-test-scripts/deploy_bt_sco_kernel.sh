@@ -8,9 +8,14 @@ TARGET_USER="${TARGET_USER:-elmot}"
 TARGET_PASS="${TARGET_PASS:-q}"
 
 PKG_DIR="${PKG_DIR:-/home/elmot/.local/var/pmbootstrap/packages/v26.06/armv7}"
-KERNEL_APK="${PKG_DIR}/linux-postmarketos-qcom-msm8916-6.12.1_p20261119154522-r6.apk"
-DEVICE_APK="${PKG_DIR}/device-nokia-argon-10-r3.apk"
-FW_APK="${PKG_DIR}/device-nokia-argon-nonfree-firmware-10-r3.apk"
+KERNEL_APK="${KERNEL_APK:-$(ls -1t "${PKG_DIR}"/linux-postmarketos-qcom-msm8916-*.apk | head -n1)}"
+DEVICE_APK="${DEVICE_APK:-$(ls -1t "${PKG_DIR}"/device-nokia-argon-[0-9]*.apk | head -n1)}"
+FW_APK="${FW_APK:-$(ls -1t "${PKG_DIR}"/device-nokia-argon-nonfree-firmware-[0-9]*.apk | head -n1)}"
+
+echo "Selected packages:"
+echo "  KERNEL_APK=$KERNEL_APK"
+echo "  DEVICE_APK=$DEVICE_APK"
+echo "  FW_APK=$FW_APK"
 
 SSH_OPTS=(-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new)
 
@@ -48,14 +53,17 @@ echo "=== [2/4] Copying built .apk packages to ${TARGET_USER}@${TARGET_IP}:/tmp/
 scp "${SSH_OPTS[@]}" "$KERNEL_APK" "$DEVICE_APK" "$FW_APK" "${TARGET_USER}@${TARGET_IP}:/tmp/"
 
 echo "=== [3/4] Installing packages offline with apk add --no-network --allow-untrusted ==="
-ssh "${SSH_OPTS[@]}" "${TARGET_USER}@${TARGET_IP}" "TARGET_PASS='${TARGET_PASS}' sh -s" <<'EOF'
+KERNEL_BASE="$(basename "$KERNEL_APK")"
+DEVICE_BASE="$(basename "$DEVICE_APK")"
+FW_BASE="$(basename "$FW_APK")"
+ssh "${SSH_OPTS[@]}" "${TARGET_USER}@${TARGET_IP}" "TARGET_PASS='${TARGET_PASS}' KERNEL_BASE='${KERNEL_BASE}' DEVICE_BASE='${DEVICE_BASE}' FW_BASE='${FW_BASE}' sh -s" <<'EOF'
 set -eu
 printf '%s\n' "$TARGET_PASS" | sudo -S -v
 
 sudo apk add --no-network --allow-untrusted \
-    /tmp/linux-postmarketos-qcom-msm8916-6.12.1_p20261119154522-r6.apk \
-    /tmp/device-nokia-argon-10-r3.apk \
-    /tmp/device-nokia-argon-nonfree-firmware-10-r3.apk
+    "/tmp/${KERNEL_BASE}" \
+    "/tmp/${DEVICE_BASE}" \
+    "/tmp/${FW_BASE}"
 
 rm -f /tmp/linux-postmarketos-qcom-msm8916-*.apk /tmp/device-nokia-argon-*.apk
 
@@ -84,7 +92,7 @@ ssh "${SSH_OPTS[@]}" "${TARGET_USER}@${TARGET_IP}" '
 set -eu
 ls -lh /boot/vmlinuz /boot/initramfs /boot/boot.img /boot/qcom-msm8905-nokia-argon.dtb /boot/dtbs/qcom-msm8905-nokia-argon.dtb /usr/share/nokia-argon/qcom-msm8905-nokia-argon.dtb
 find /lib/modules -name "snd-soc-bt-sco*" -o -name "q6afe*" -o -name "q6routing*" -o -name "snd-soc-apq8016-sbc*" | sort
-strings /boot/dtbs/qcom-msm8905-nokia-argon.dtb | grep -E "linux,bt-sco|dai@13[67]|backend[23]-dai-link" || true
+strings /boot/dtbs/qcom-msm8905-nokia-argon.dtb | grep -E "linux,bt-sco|dai@13[67]|dai@4|frontend5-dai-link|backend[23]-dai-link" || true
 cat /boot/extlinux/extlinux.conf 2>/dev/null || true
 '
 echo "=== DONE: Packages deployed. Please reboot nokia-argon to boot the new kernel. ==="
