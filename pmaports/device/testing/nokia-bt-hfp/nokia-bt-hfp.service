@@ -1,0 +1,14 @@
+[Unit]
+Description=Nokia 8110 4G Bluetooth HFP-HF + Q6AFE INT_BT_SCO Audio Bridge
+After=pipewire.service wireplumber.service bluetooth.target
+Wants=pipewire.service wireplumber.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nokia-bt-hfp --earpiece --mic dual
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

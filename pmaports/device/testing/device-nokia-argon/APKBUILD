@@ -3,7 +3,7 @@ maintainer=""
 pkgname=device-nokia-argon
 pkgdesc="Nokia 8110 4G"
 pkgver=10
-pkgrel=5
+pkgrel=6
 url="https://postmarketos.org"
 license="GPL-2.0-only"
 arch="armv7"
@@ -12,6 +12,7 @@ depends="
 	bluez
 	linux-postmarketos-qcom-msm8916
 	mkbootimg
+	nokia-bt-hfp
 	postmarketos-base
 	python3
 	soc-qcom-msm8909
