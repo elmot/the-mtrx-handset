@@ -905,12 +905,12 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 		write_state_file(app);
 		snprintf(reply, reply_sz, "OK headphones\n");
 	} else if (strcmp(cmd, "mic") == 0 && arg) {
-		if (strcmp(arg, "dual") == 0)
-			alsa_bridge_set_mic_source(app->bridge, MIC_DUAL);
+		if (strcmp(arg, "amic1") == 0)
+			alsa_bridge_set_mic_source(app->bridge, MIC_AMIC1);
 		else if (strcmp(arg, "amic3") == 0)
 			alsa_bridge_set_mic_source(app->bridge, MIC_AMIC3);
 		else
-			alsa_bridge_set_mic_source(app->bridge, MIC_AMIC1);
+			alsa_bridge_set_mic_source(app->bridge, MIC_DUAL);
 		write_state_file(app);
 		snprintf(reply, reply_sz, "OK mic %s\n", arg);
 	} else if (strcmp(cmd, "mute") == 0) {
@@ -1058,7 +1058,7 @@ int main(int argc, char **argv)
 	struct hfp_app app;
 	struct alsa_bridge_cfg bcfg = {
 		.output_mode = OUTPUT_EARPIECE,
-		.mic_source = MIC_AMIC1,
+		.mic_source = MIC_DUAL,
 		.vgs_level = 12,
 		.vgm_level = 12,
 		.enable_aec = true,
@@ -1091,12 +1091,12 @@ int main(int argc, char **argv)
 			bcfg.output_mode = OUTPUT_HEADPHONES;
 		} else if (strcmp(argv[i], "--mic") == 0 && i + 1 < argc) {
 			i++;
-			if (strcmp(argv[i], "dual") == 0)
-				bcfg.mic_source = MIC_DUAL;
+			if (strcmp(argv[i], "amic1") == 0)
+				bcfg.mic_source = MIC_AMIC1;
 			else if (strcmp(argv[i], "amic3") == 0)
 				bcfg.mic_source = MIC_AMIC3;
 			else
-				bcfg.mic_source = MIC_AMIC1;
+				bcfg.mic_source = MIC_DUAL;
 		} else if (strcmp(argv[i], "--no-aec") == 0) {
 			bcfg.enable_aec = false;
 		} else if (strcmp(argv[i], "--no-ns") == 0) {
@@ -1105,8 +1105,8 @@ int main(int argc, char **argv)
 			bcfg.verbose = true;
 		} else {
 			fprintf(stderr,
-				"Usage: %s [--earpiece|--speaker|--headphones] [--mic amic1|amic3] [--no-aec] [--no-ns] [--verbose]\n"
-				"       %s --ctl status|answer|hangup|redial|dial <num>|sco-open|earpiece|speaker|headphones|mic amic1|amic3|mute|unmute|vgs <0-15>|vgm <0-15>\n",
+				"Usage: %s [--earpiece|--speaker|--headphones] [--mic dual|amic1|amic3] [--no-aec] [--no-ns] [--verbose]\n"
+				"       %s --ctl status|answer|hangup|redial|dial <num>|sco-open|earpiece|speaker|headphones|mic dual|amic1|amic3|mute|unmute|vgs <0-15>|vgm <0-15>\n",
 				argv[0], argv[0]);
 			return 1;
 		}
