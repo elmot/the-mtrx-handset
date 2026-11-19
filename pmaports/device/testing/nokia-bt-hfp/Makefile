@@ -1,7 +1,9 @@
 CC ?= gcc
 PKG_CONFIG ?= pkg-config
 
-CFLAGS ?= -O2 -Wall -Wextra -Wshadow -std=gnu11
+# abuild overrides CFLAGS/LDFLAGS; keep warnings and std regardless
+CFLAGS ?= -O2
+override CFLAGS += -Wall -Wextra -Wshadow -std=gnu11
 PKGS := gio-2.0 gio-unix-2.0 alsa speexdsp
 
 PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS))
@@ -14,7 +16,7 @@ TARGET := nokia-bt-hfp
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(PKG_LIBS) -pthread -lm
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(PKG_LIBS) -pthread -lm
 
 %.o: %.c alsa_bridge.h
 	$(CC) $(CFLAGS) $(PKG_CFLAGS) -c -o $@ $<

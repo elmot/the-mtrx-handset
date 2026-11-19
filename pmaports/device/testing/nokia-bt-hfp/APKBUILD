@@ -1,14 +1,16 @@
 # Maintainer:
 pkgname=nokia-bt-hfp
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Nokia 8110 4G Bluetooth HFP-HF + Q6AFE INT_BT_SCO audio bridge with dual-mic noise cancellation"
 url="https://postmarketos.org"
 arch="armv7"
 license="GPL-2.0-only"
 options="!check"
-depends="alsa-lib bluez dbus-libs glib pipewire speexdsp wireplumber"
-makedepends="alsa-lib-dev bluez-dev glib-dev speexdsp-dev"
+# shared libs (alsa-lib, glib, speexdsp) are picked up automatically as so: deps;
+# pactl/notify-send are invoked at runtime
+depends="bluez libnotify pipewire pipewire-pulse pulseaudio-utils wireplumber"
+makedepends="alsa-lib-dev glib-dev speexdsp-dev"
 source="
 	Makefile
 	alsa_bridge.c
@@ -50,10 +52,10 @@ package() {
 		"$pkgdir/usr/share/wireplumber/wireplumber.conf.d/50-nokia-bluez-handset.conf"
 }
 sha512sums="
-8df22d75754ed2e25c644ce116881b697c15533ef835a1f3448ccd734356bca8d80e5bf3cca566f3bdb05c762d9c8adc547e2bb4c7ab38fbe3d1c2b78c5be8e3  Makefile
-2266947eca2d87505d35e62ca6a0c1d95a483aa86ba248dd4bb20907b348f98f60b23fd8de5bd46ced59948212cb12f22b09abfd3ebb9d299e01c212045bb29f  alsa_bridge.c
-0c3c15dc44ed91d9c80d040736ccbd0469ab933f337a5b0ec8a9c010e63db35718d8e13d7dccf87cf2c21e3aa11a40820deb431594f6f1aefc4fea6f91123310  alsa_bridge.h
-9e1096b5b755b939ad112ad13273cef8c574b83cb571bf00b3ee58e7ce31b175384c443d070ab460953c06b8ec123e31ad75eeed483edd8c9ff3b5b94802ef44  nokia_bt_hfp.c
+cfab0e87e8c5be059bc50bdeb61be248029d1a6b39aef227c81da97f5e4ba8ab7835da2ea654a0be075eb98a6b89ef5dc79fa1384e1d2121f59eda5634eeee80  Makefile
+a8fa0118eee89a8eff9bba67d0efe79b8b9d3d2dd48daa8237fded12608a6b893751e033958a96190b3ade4c802bb287ac3ccad42aa5cb33bfbe574fd0ed03cd  alsa_bridge.c
+700fb46b802f1a03b01affaed2c5ab8e92228be5f10415ce487e205c8a1cd926eb4cf4c366dd24b5a93a701fd8119ee582c6c167ff3288bb7d46be0e86795f92  alsa_bridge.h
+d15ba31ce57260e4c4f8d3f0c33b0be2a3057072ee469ad761812fb92432674b74fcd0c36564069130355928e8aa71f9c00f38434203b42c34ff38ba7b563d50  nokia_bt_hfp.c
 dffe8962417836c14ee4f372a50067a166398a98029701ce53dd4873bc14576fc1eaffe3ab8d773681d89e08014873218b2b192ef6bf79288d5a246b5e5296a3  nokia-bt-hfp.service
 a36b8201300d4efb78bd75553078dab19600a9524d88c6837b2bb665c3ebeef5835b1d8b0a0fe7bf942e084fee783d4f2127dea17edc885c2d40b7f133bd8729  85-nokia-bt-hfp.preset
 4511b56281bbd29931c523c55bef9b063282b2cad1dbd8a46b387fa9b1a69033130707821165fc523732a8935bdf3e917423680f4e7cfe519e11955f839086bc  nokia-bt-hfp-dbus.conf

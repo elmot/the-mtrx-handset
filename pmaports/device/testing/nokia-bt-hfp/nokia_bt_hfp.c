@@ -5,14 +5,15 @@
 #include <fcntl.h>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <glib-unix.h>
 #include <signal.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -48,13 +49,9 @@ static const char profile_xml[] =
 	"</node>";
 
 struct cind_map {
-	int service;
 	int call;
 	int callsetup;
 	int callheld;
-	int signal;
-	int roam;
-	int battchg;
 };
 
 struct hfp_app {
@@ -64,7 +61,6 @@ struct hfp_app {
 	guint bluez_watch_id;
 	guint adapter_timer_id;
 	int adapter_retries;
-	bool profile_registered;
 
 	struct alsa_bridge *bridge;
 	char ctl_sock_path[256];
@@ -99,12 +95,10 @@ struct hfp_app {
 	int val_call;
 	int val_callsetup;
 	int val_callheld;
-	int val_service;
-	int val_signal;
 	char caller_id[64];
 };
 
-static struct hfp_app *g_app = NULL;
+static void pump_at_queue(struct hfp_app *app);
 
 static void get_runtime_paths(char *sock_out, size_t sock_sz, char *state_out,
 			      size_t state_sz)
@@ -220,6 +214,7 @@ static gboolean on_at_timeout(gpointer user_data)
 		fprintf(stderr, "[hfp] AT timeout waiting for response to: %s\n",
 			app->at_current);
 		app->at_inflight = false;
+		pump_at_queue(app);
 	}
 	return G_SOURCE_REMOVE;
 }
@@ -241,12 +236,11 @@ static void pump_at_queue(struct hfp_app *app)
 
 	len = (size_t)snprintf(wire, sizeof(wire), "%s\r", app->at_current);
 	w = write(app->rfcomm_fd, wire, len);
-	if (w < 0) {
+	if (w != (ssize_t)len)
 		fprintf(stderr, "[hfp] RFCOMM write '%s' failed: %s\n",
-			app->at_current, strerror(errno));
-		return;
-	}
+			app->at_current, w < 0 ? strerror(errno) : "short write");
 
+	/* Arm the timeout even on failure so the queue keeps draining */
 	app->at_inflight = true;
 	if (app->at_timeout_id)
 		g_source_remove(app->at_timeout_id);
@@ -270,6 +264,15 @@ static void queue_at(struct hfp_app *app, const char *cmd)
 
 static void parse_cind_map(struct hfp_app *app, const char *line)
 {
+	static const struct {
+		const char *name;
+		size_t off;
+	} names[] = {
+		{ "call", offsetof(struct cind_map, call) },
+		{ "callsetup", offsetof(struct cind_map, callsetup) },
+		{ "call_setup", offsetof(struct cind_map, callsetup) },
+		{ "callheld", offsetof(struct cind_map, callheld) },
+	};
 	const char *p = line;
 	int idx = 1;
 
@@ -277,43 +280,28 @@ static void parse_cind_map(struct hfp_app *app, const char *line)
 	while ((p = strchr(p, '(')) != NULL) {
 		const char *q1 = strchr(p, '"');
 		const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+		size_t len;
+
 		if (!q1 || !q2)
 			break;
-		if (strncmp(q1 + 1, "service", (size_t)(q2 - q1 - 1)) == 0)
-			app->cind.service = idx;
-		else if (strncmp(q1 + 1, "call", (size_t)(q2 - q1 - 1)) == 0)
-			app->cind.call = idx;
-		else if (strncmp(q1 + 1, "callsetup", (size_t)(q2 - q1 - 1)) ==
-			 0)
-			app->cind.callsetup = idx;
-		else if (strncmp(q1 + 1, "call_setup", (size_t)(q2 - q1 - 1)) ==
-			 0)
-			app->cind.callsetup = idx;
-		else if (strncmp(q1 + 1, "callheld", (size_t)(q2 - q1 - 1)) ==
-			 0)
-			app->cind.callheld = idx;
-		else if (strncmp(q1 + 1, "signal", (size_t)(q2 - q1 - 1)) == 0)
-			app->cind.signal = idx;
-		else if (strncmp(q1 + 1, "roam", (size_t)(q2 - q1 - 1)) == 0)
-			app->cind.roam = idx;
-		else if (strncmp(q1 + 1, "battchg", (size_t)(q2 - q1 - 1)) == 0)
-			app->cind.battchg = idx;
+		len = (size_t)(q2 - q1 - 1);
+		for (size_t i = 0; i < G_N_ELEMENTS(names); i++) {
+			if (strlen(names[i].name) == len &&
+			    strncmp(q1 + 1, names[i].name, len) == 0)
+				*(int *)((char *)&app->cind + names[i].off) = idx;
+		}
 		idx++;
 		p = q2 + 1;
 	}
-	fprintf(stderr,
-		"[hfp] CIND map: service=%d call=%d callsetup=%d callheld=%d\n",
-		app->cind.service, app->cind.call, app->cind.callsetup,
-		app->cind.callheld);
+	fprintf(stderr, "[hfp] CIND map: call=%d callsetup=%d callheld=%d\n",
+		app->cind.call, app->cind.callsetup, app->cind.callheld);
 }
 
 static void apply_indicator(struct hfp_app *app, int idx, int val)
 {
 	if (idx <= 0)
 		return;
-	if (idx == app->cind.service) {
-		app->val_service = val;
-	} else if (idx == app->cind.call) {
+	if (idx == app->cind.call) {
 		int prev = app->val_call;
 		app->val_call = val;
 		if (val == 1 && prev == 0)
@@ -331,8 +319,6 @@ static void apply_indicator(struct hfp_app *app, int idx, int val)
 			app->caller_id[0] = '\0';
 	} else if (idx == app->cind.callheld) {
 		app->val_callheld = val;
-	} else if (idx == app->cind.signal) {
-		app->val_signal = val;
 	}
 }
 
@@ -354,23 +340,29 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 			parse_cind_map(app, rest);
 		} else {
 			int idx = 1;
-			char *dup = strdup(rest);
-			char *tok = strtok(dup, ",");
-			while (tok) {
-				apply_indicator(app, idx++, atoi(tok));
-				tok = strtok(NULL, ",");
+			const char *p = rest;
+			char *end;
+
+			while (*p) {
+				long v = strtol(p, &end, 10);
+				if (end == p)
+					break;
+				apply_indicator(app, idx++, (int)v);
+				p = end;
+				while (*p == ',' || *p == ' ')
+					p++;
 			}
-			free(dup);
 		}
 	} else if (strncmp(line, "+CIEV:", 6) == 0) {
 		int idx = 0, val = 0;
 		if (sscanf(line + 6, " %d , %d", &idx, &val) == 2)
 			apply_indicator(app, idx, val);
 	} else if (strncmp(line, "+BCS:", 5) == 0) {
-		int codec = atoi(line + 5);
-		char reply[32];
-		snprintf(reply, sizeof(reply), "AT+BCS=%d", codec);
-		queue_at(app, reply);
+		/* Only CVSD (1) is usable over INT_BT_SCO 8 kHz; re-advertise otherwise */
+		if (atoi(line + 5) == 1)
+			queue_at(app, "AT+BCS=1");
+		else
+			queue_at(app, "AT+BAC=1");
 	} else if (strncmp(line, "+CLIP:", 6) == 0) {
 		const char *q1 = strchr(line + 6, '"');
 		const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
@@ -388,7 +380,7 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 		int v = atoi(line + 5);
 		alsa_bridge_set_vgm(app->bridge, v);
 	} else if (strcmp(line, "RING") == 0) {
-		app->val_callsetup = 1;
+		/* callsetup state is driven by +CIEV only, so "incoming" fires reliably */
 		run_call_hook(app, "ring");
 	} else if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
 		   strncmp(line, "+CME ERROR:", 11) == 0) {
@@ -400,6 +392,10 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 		}
 		if (app->at_inflight) {
 			if (strncmp(app->at_current, "AT+BRSF=", 8) == 0 && ok) {
+				struct alsa_bridge_cfg cfg;
+				char at[32];
+
+				alsa_bridge_get_cfg(app->bridge, &cfg);
 				if (app->ag_features & (1U << 9))
 					queue_at(app, "AT+BAC=1");
 				queue_at(app, "AT+CIND=?");
@@ -409,8 +405,10 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 					queue_at(app, "AT+CHLD=?");
 				queue_at(app, "AT+CLIP=1");
 				queue_at(app, "AT+CMEE=1");
-				queue_at(app, "AT+VGS=12");
-				queue_at(app, "AT+VGM=12");
+				snprintf(at, sizeof(at), "AT+VGS=%d", cfg.vgs_level);
+				queue_at(app, at);
+				snprintf(at, sizeof(at), "AT+VGM=%d", cfg.vgm_level);
+				queue_at(app, at);
 			} else if (strncmp(app->at_current, "AT+CMER=", 8) == 0 &&
 				   ok) {
 				app->slc_ready = true;
@@ -744,10 +742,8 @@ static void register_bluez_profile(struct hfp_app *app)
 			"[bluez] RegisterProfile failed (is WirePlumber hfp_hf disabled?): %s\n",
 			err ? err->message : "unknown");
 		g_clear_error(&err);
-		app->profile_registered = false;
 	} else {
 		g_variant_unref(res);
-		app->profile_registered = true;
 		fprintf(stderr, "[bluez] Registered HFP-HF profile (%s)\n",
 			HFP_HF_UUID);
 	}
@@ -822,7 +818,6 @@ static void on_bluez_vanished(GDBusConnection *conn, const gchar *name,
 		g_source_remove(app->adapter_timer_id);
 		app->adapter_timer_id = 0;
 	}
-	app->profile_registered = false;
 	close_rfcomm(app);
 }
 
@@ -879,6 +874,9 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 	} else if (strcmp(cmd, "dial") == 0 && arg && arg[0]) {
 		if (app->rfcomm_fd < 0)
 			snprintf(reply, reply_sz, "ERR not connected\n");
+		else if (arg[strspn(arg, "0123456789*#+")] != '\0' ||
+			 strlen(arg) > 32)
+			snprintf(reply, reply_sz, "ERR invalid number\n");
 		else {
 			char at[128];
 			snprintf(at, sizeof(at), "ATD%s;", arg);
@@ -969,6 +967,11 @@ static gboolean on_ctl_accept(GIOChannel *src, GIOCondition cond,
 	if (cfd < 0)
 		return G_SOURCE_CONTINUE;
 
+	/* Never let a silent client block the main loop */
+	struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+	setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
 	n = read(cfd, buf, sizeof(buf) - 1);
 	if (n > 0) {
 		buf[n] = '\0';
@@ -994,11 +997,14 @@ static int setup_ctl_socket(struct hfp_app *app)
 	addr.sun_family = AF_UNIX;
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
 		 app->ctl_sock_path);
+	mode_t old_umask = umask(0077); /* socket owner-only, even under /tmp */
 	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
 	    listen(fd, 8) < 0) {
+		umask(old_umask);
 		close(fd);
 		return -errno;
 	}
+	umask(old_umask);
 
 	app->ctl_listen_fd = fd;
 	ch = g_io_channel_unix_new(fd);
@@ -1046,16 +1052,16 @@ static int send_ctl_cli(const char *sock_path, int argc, char **argv, int start)
 	return 0;
 }
 
-static void on_sig(int sig)
+static gboolean on_quit_signal(gpointer user_data)
 {
-	(void)sig;
-	if (g_app && g_app->loop)
-		g_main_loop_quit(g_app->loop);
+	g_main_loop_quit(user_data);
+	return G_SOURCE_CONTINUE;
 }
 
 int main(int argc, char **argv)
 {
 	struct hfp_app app;
+	int ret = 1;
 	struct alsa_bridge_cfg bcfg = {
 		.output_mode = OUTPUT_EARPIECE,
 		.mic_source = MIC_DUAL,
@@ -1122,15 +1128,13 @@ int main(int argc, char **argv)
 	if (!app.sys_bus) {
 		fprintf(stderr, "Failed to connect to system D-Bus: %s\n",
 			err ? err->message : "unknown");
-		g_clear_error(&err);
-		alsa_bridge_destroy(app.bridge);
-		return 1;
+		goto out;
 	}
 
 	introspection = g_dbus_node_info_new_for_xml(profile_xml, &err);
 	if (!introspection) {
-		fprintf(stderr, "XML error: %s\n", err->message);
-		return 1;
+		fprintf(stderr, "XML error: %s\n", err ? err->message : "unknown");
+		goto out;
 	}
 
 	app.reg_id = g_dbus_connection_register_object(
@@ -1138,19 +1142,19 @@ int main(int argc, char **argv)
 		&vtable, &app, NULL, &err);
 	g_dbus_node_info_unref(introspection);
 	if (app.reg_id == 0) {
-		fprintf(stderr, "Register object failed: %s\n", err->message);
-		return 1;
+		fprintf(stderr, "Register object failed: %s\n",
+			err ? err->message : "unknown");
+		goto out;
 	}
 
 	if (setup_sco_listener(&app) < 0)
-		return 1;
+		goto out;
 	if (setup_ctl_socket(&app) < 0)
 		fprintf(stderr, "[ctl] failed to bind %s\n", app.ctl_sock_path);
 
 	app.loop = g_main_loop_new(NULL, FALSE);
-	g_app = &app;
-	signal(SIGINT, on_sig);
-	signal(SIGTERM, on_sig);
+	g_unix_signal_add(SIGINT, on_quit_signal, app.loop);
+	g_unix_signal_add(SIGTERM, on_quit_signal, app.loop);
 	signal(SIGPIPE, SIG_IGN);
 
 	app.bluez_watch_id = g_bus_watch_name_on_connection(
@@ -1161,8 +1165,11 @@ int main(int argc, char **argv)
 	fprintf(stderr, "[main] nokia-bt-hfp started (ctl=%s)\n",
 		app.ctl_sock_path);
 	g_main_loop_run(app.loop);
-
 	fprintf(stderr, "[main] shutting down\n");
+	ret = 0;
+
+out:
+	g_clear_error(&err);
 	close_rfcomm(&app);
 	if (app.sco_listen_watch_id)
 		g_source_remove(app.sco_listen_watch_id);
@@ -1170,9 +1177,10 @@ int main(int argc, char **argv)
 		close(app.sco_listen_fd);
 	if (app.ctl_watch_id)
 		g_source_remove(app.ctl_watch_id);
-	if (app.ctl_listen_fd >= 0)
+	if (app.ctl_listen_fd >= 0) {
 		close(app.ctl_listen_fd);
-	unlink(app.ctl_sock_path);
+		unlink(app.ctl_sock_path);
+	}
 	unlink(app.state_path);
 	if (app.adapter_timer_id)
 		g_source_remove(app.adapter_timer_id);
@@ -1180,8 +1188,10 @@ int main(int argc, char **argv)
 		g_bus_unwatch_name(app.bluez_watch_id);
 	if (app.reg_id)
 		g_dbus_connection_unregister_object(app.sys_bus, app.reg_id);
-	g_object_unref(app.sys_bus);
-	g_main_loop_unref(app.loop);
+	if (app.sys_bus)
+		g_object_unref(app.sys_bus);
+	if (app.loop)
+		g_main_loop_unref(app.loop);
 	alsa_bridge_destroy(app.bridge);
-	return 0;
+	return ret;
 }

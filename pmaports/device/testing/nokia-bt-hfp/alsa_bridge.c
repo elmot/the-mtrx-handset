@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <speex/speex_echo.h>
 #include <speex/speex_preprocess.h>
 #include <stdio.h>
@@ -37,8 +38,9 @@ struct alsa_bridge {
 	pthread_mutex_t aec_lock;
 	pthread_t dl_thread;
 	pthread_t ul_thread;
-	volatile bool running;
-	volatile bool stop_req;
+	_Atomic bool running;
+	_Atomic bool stop_req;
+	bool mixers_active;
 
 	snd_pcm_t *cap_sco;
 	snd_pcm_t *play_spk;
@@ -221,7 +223,6 @@ static void pipewire_suspend_card(struct alsa_bridge *br)
 {
 	FILE *fp;
 	char line[256];
-	bool in_card = false;
 
 	br->pw_suspended = false;
 	snprintf(br->saved_pw_profile, sizeof(br->saved_pw_profile),
@@ -245,9 +246,7 @@ static void pipewire_suspend_card(struct alsa_bridge *br)
 					 line);
 		}
 		pclose(fp);
-		in_card = true;
 	}
-	(void)in_card;
 
 	if (system("pactl set-card-profile alsa_card.platform-7702000.sound off >/dev/null 2>&1") ==
 	    0) {
@@ -578,6 +577,11 @@ static void *downlink_worker(void *arg)
 	int16_t silence[HFP_FRAME_SAMPLES] = {0};
 	unsigned int frames = 0;
 	int16_t sec_peak = 0;
+	bool verbose;
+
+	pthread_mutex_lock(&br->cfg_lock);
+	verbose = br->cfg.verbose;
+	pthread_mutex_unlock(&br->cfg_lock);
 
 	/* Prefill 2 periods so playback starts smoothly without underrun */
 	pcm_write_frame(br, br->play_spk, silence, HFP_FRAME_SAMPLES, "dl_pre");
@@ -590,7 +594,7 @@ static void *downlink_worker(void *arg)
 				   "dl_cap") < 0)
 			break;
 
-		if (br->cfg.verbose) {
+		if (verbose) {
 			pk = frame_peak(buf, HFP_FRAME_SAMPLES);
 			if (pk > sec_peak)
 				sec_peak = pk;
@@ -808,6 +812,7 @@ int alsa_bridge_start(struct alsa_bridge *br)
 	int val_on = 1;
 	int val_off = 0;
 	int noise_db = -18;
+	int rc;
 
 	if (!br)
 		return -EINVAL;
@@ -818,6 +823,7 @@ int alsa_bridge_start(struct alsa_bridge *br)
 
 	pthread_mutex_lock(&br->cfg_lock);
 	configure_call_mixers(br, true);
+	br->mixers_active = true;
 	pthread_mutex_unlock(&br->cfg_lock);
 
 	if (open_pcm(br->devs.card, br->devs.mm5_cap, SND_PCM_STREAM_CAPTURE,
@@ -861,17 +867,20 @@ int alsa_bridge_start(struct alsa_bridge *br)
 	br->stop_req = false;
 	br->running = true;
 
-	if (pthread_create(&br->dl_thread, NULL, downlink_worker, br) != 0) {
+	rc = pthread_create(&br->dl_thread, NULL, downlink_worker, br);
+	if (rc != 0) {
+		br->running = false;
 		alsa_bridge_stop(br);
-		return -errno;
+		return -rc;
 	}
-	if (pthread_create(&br->ul_thread, NULL, uplink_worker, br) != 0) {
+	rc = pthread_create(&br->ul_thread, NULL, uplink_worker, br);
+	if (rc != 0) {
 		br->stop_req = true;
 		snd_pcm_drop(br->cap_sco);
 		pthread_join(br->dl_thread, NULL);
 		br->running = false;
 		alsa_bridge_stop(br);
-		return -errno;
+		return -rc;
 	}
 
 	fprintf(stderr, "[bridge] started full-duplex INT_BT_SCO audio bridge\n");
@@ -929,7 +938,10 @@ void alsa_bridge_stop(struct alsa_bridge *br)
 		br->echo = NULL;
 	}
 
-	configure_call_mixers(br, false);
+	if (br->mixers_active) {
+		configure_call_mixers(br, false);
+		br->mixers_active = false;
+	}
 	pipewire_restore_card(br);
 
 	if (was_running)
@@ -1015,11 +1027,11 @@ void alsa_bridge_set_dsp(struct alsa_bridge *br, bool enable_aec, bool enable_ns
 	pthread_mutex_unlock(&br->cfg_lock);
 }
 
-void alsa_bridge_get_cfg(const struct alsa_bridge *br, struct alsa_bridge_cfg *out)
+void alsa_bridge_get_cfg(struct alsa_bridge *br, struct alsa_bridge_cfg *out)
 {
 	if (!br || !out)
 		return;
-	pthread_mutex_lock((pthread_mutex_t *)&br->cfg_lock);
+	pthread_mutex_lock(&br->cfg_lock);
 	*out = br->cfg;
-	pthread_mutex_unlock((pthread_mutex_t *)&br->cfg_lock);
+	pthread_mutex_unlock(&br->cfg_lock);
 }

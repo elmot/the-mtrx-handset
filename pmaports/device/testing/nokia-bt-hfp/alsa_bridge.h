@@ -41,6 +41,6 @@ void alsa_bridge_set_vgs(struct alsa_bridge *br, int vgs);
 void alsa_bridge_set_vgm(struct alsa_bridge *br, int vgm);
 void alsa_bridge_set_mute(struct alsa_bridge *br, bool muted);
 void alsa_bridge_set_dsp(struct alsa_bridge *br, bool enable_aec, bool enable_ns);
-void alsa_bridge_get_cfg(const struct alsa_bridge *br, struct alsa_bridge_cfg *out);
+void alsa_bridge_get_cfg(struct alsa_bridge *br, struct alsa_bridge_cfg *out);
 
 #endif /* ALSA_BRIDGE_H */
