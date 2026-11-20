@@ -170,13 +170,6 @@ static void run_call_hook(struct hfp_app *app, const char *event)
 				      NULL, NULL, NULL, NULL);
 		}
 	}
-	if (strcmp(event, "incoming") == 0) {
-		const char *who = app->caller_id[0] ? app->caller_id : app->peer_addr;
-		char *argv[] = { "notify-send", "-u", "critical",
-				 "Incoming Bluetooth Call", (char *)who, NULL };
-		g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-			      NULL, NULL, NULL, NULL);
-	}
 }
 
 static gboolean on_at_timeout(gpointer user_data)
@@ -286,8 +279,10 @@ static void apply_indicator(struct hfp_app *app, int idx, int val)
 		app->val_callsetup = val;
 		if (val == 1 && prev != 1)
 			run_call_hook(app, "incoming");
-		else if (val == 0 && prev == 1 && app->val_call == 0)
+		else if (val == 0 && prev == 1 && app->val_call == 0) {
 			app->caller_id[0] = '\0';
+			run_call_hook(app, "ended");
+		}
 	} else if (idx == app->cind.callheld) {
 		app->val_callheld = val;
 	}
