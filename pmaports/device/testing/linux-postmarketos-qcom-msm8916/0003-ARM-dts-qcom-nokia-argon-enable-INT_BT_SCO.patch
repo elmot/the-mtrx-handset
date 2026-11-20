@@ -1,5 +1,5 @@
 diff --git a/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts b/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
-index faac215c0..1efe32499 100644
+index faac215c0..ae3dcadb5 100644
 --- a/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
 +++ b/arch/arm/boot/dts/qcom/qcom-msm8905-nokia-argon.dts
 @@ -41,6 +41,11 @@ backlight: backlight {
@@ -14,7 +14,25 @@ index faac215c0..1efe32499 100644
  	bat: battery {
  		compatible = "simple-battery";
  		voltage-min-design-microvolt = <3400000>;
-@@ -255,6 +260,12 @@ dai@20 {
+@@ -81,15 +86,9 @@ key-back {
+ 			linux,can-disable;
+ 		};
+ 
+-		switch-lid-close {
++		switch-keypad-slide {
+ 			wakeup-source;
+-			gpios = <&tlmm 92 GPIO_ACTIVE_LOW>;
+-			linux,input-type = <EV_SW>;
+-			linux,code = <SW_LID>;
+-		};
+-
+-		switch-lid-open {
+-			gpios = <&tlmm 36 GPIO_ACTIVE_LOW>;
++			gpios = <&tlmm 92 GPIO_ACTIVE_HIGH>;
+ 			linux,input-type = <EV_SW>;
+ 			linux,code = <SW_KEYPAD_SLIDE>;
+ 		};
+@@ -255,6 +254,12 @@ dai@20 {
  		reg = <TERTIARY_MI2S_TX>;
  		qcom,sd-lines = <0 1>;
  	};
@@ -27,7 +45,7 @@ index faac215c0..1efe32499 100644
  };
  
  &q6asmdai {
-@@ -275,6 +286,10 @@ dai@3 {
+@@ -275,6 +280,10 @@ dai@3 {
  		direction = <Q6ASM_DAI_RX>;
  		is-compress-dai;
  	};
@@ -38,7 +56,7 @@ index faac215c0..1efe32499 100644
  };
  
  &sdhc_1 {
-@@ -341,6 +356,14 @@ cpu {
+@@ -341,6 +350,14 @@ cpu {
  		};
  	};
  
@@ -53,7 +71,7 @@ index faac215c0..1efe32499 100644
  	sound_link_backend0: backend0-dai-link {
  		link-name = "Primary MI2S";
  
-@@ -368,6 +391,34 @@ codec {
+@@ -368,6 +385,34 @@ codec {
  			sound-dai = <&lpass_codec 1>, <&pm8909_codec 1>;
  		};
  	};

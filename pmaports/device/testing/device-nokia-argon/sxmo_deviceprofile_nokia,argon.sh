@@ -12,6 +12,10 @@ export SXMO_MIN_BRIGHTNESS="1"
 export SXMO_NO_VIRTUAL_KEYBOARD="1"
 export SXMO_DISABLE_LEDS="1"
 
+# Three states: unlock -> lock (screen stays visible while keypad is covered) -> screenoff (after 10s idle)
+export SXMO_STATES="unlock lock screenoff"
+export SXMO_LOCK_IDLE_TIME="10"
+
 # Fit menus comfortably on 240x320 portrait screen
 export SXMO_BEMENU_PORTRAIT_LINES="10"
 export SXMO_BEMENU_LANDSCAPE_LINES="10"

@@ -6,7 +6,7 @@ pkgver=6.12.1
 # When making kernel config changes please also submit a PR to
 # https://github.com/msm8916-mainline/linux/blob/master/kernel/configs/pmos.config
 # since the kernel config is regenerated on upgrades and all changes will be lost!
-pkgrel=7
+pkgrel=8
 pkgdesc="Mainline kernel fork for Qualcomm MSM8909/MSM8916/MSM8939 devices"
 arch="aarch64 armv7"
 url="https://github.com/msm8916-mainline/linux"
@@ -100,5 +100,5 @@ e46fecfdab77f26c5127ddfd057d31bdf441da7fbf233cd574b396e762ea8992af65f577c595bab6
 1a3b7c3de3e8447f3cb35b4199a8e1dc6baf7efa6111548a00f5e61765faef904fe7f6e2c6bfb8f7addc19f4c6e3ee6f99c85a97755915d4bdf66d6769bca9a8  config-postmarketos-qcom-msm8916.armv7
 c981c97d2dfabc5c0baeaadc42108347a0cc2a628993973a0d91fd7fc0a7d0557da4d6979e349eed82fa8c21e85ee8da4a970921255015643dc7bc0b938dfe36  0001-nokia-argon-audio-dts.patch
 71843e153b6f54489084728ebf10e14aa118d060050f7ca6738daaad0c1968c9c710f81af22108aab03c85ff1be8dbbcf7a75e64a17d41a9200e8b1714be917f  0002-ASoC-qcom-qdsp6-add-INT_BT_SCO-ports.patch
-e928451c98a29a2a54cb72285d5c2254c387fae0357b5addf2e6df418e8b852eea761ba32f63b0c8e07104f82c20cde8befef1ea01614e9a1334f95f7d6f9e65  0003-ARM-dts-qcom-nokia-argon-enable-INT_BT_SCO.patch
+e7ea988c370f25f1e0e176f0fdaec7fd12dda72744f9a61123ccedf7912f56ff386f67914a877a689ce5fea2a2f52416c78314b992524a463afc15b9a9ad1110  0003-ARM-dts-qcom-nokia-argon-enable-INT_BT_SCO.patch
 "

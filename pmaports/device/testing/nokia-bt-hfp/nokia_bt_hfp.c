@@ -63,6 +63,21 @@ static const char profile_xml[] =
 	"      <arg type='o' name='device' direction='in'/>"
 	"    </method>"
 	"  </interface>"
+	"  <interface name='org.bluez.Agent1'>"
+	"    <method name='Release'/>"
+	"    <method name='AuthorizeService'>"
+	"      <arg type='o' name='device' direction='in'/>"
+	"      <arg type='s' name='uuid' direction='in'/>"
+	"    </method>"
+	"    <method name='RequestConfirmation'>"
+	"      <arg type='o' name='device' direction='in'/>"
+	"      <arg type='u' name='passkey' direction='in'/>"
+	"    </method>"
+	"    <method name='RequestAuthorization'>"
+	"      <arg type='o' name='device' direction='in'/>"
+	"    </method>"
+	"    <method name='Cancel'/>"
+	"  </interface>"
 	"</node>";
 
 struct cind_map {
@@ -116,6 +131,9 @@ struct hfp_app {
 	int jack_fd;
 	guint jack_watch_id;
 	enum hfp_output_mode saved_output_mode;
+
+	int slide_fd;
+	guint slide_watch_id;
 };
 
 static void pump_at_queue(struct hfp_app *app);
@@ -571,6 +589,34 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 	(void)obj_path;
 	(void)iface_name;
 
+	if (strcmp(iface_name, "org.bluez.Agent1") == 0) {
+		const gchar *dev = NULL;
+		if (strcmp(method_name, "AuthorizeService") == 0) {
+			g_variant_get(parameters, "(&os)", &dev, NULL);
+		} else if (strcmp(method_name, "RequestConfirmation") == 0) {
+			g_variant_get(parameters, "(&ou)", &dev, NULL);
+		} else if (strcmp(method_name, "RequestAuthorization") == 0) {
+			g_variant_get(parameters, "(&o)", &dev);
+		} else if (strcmp(method_name, "Release") == 0 ||
+			   strcmp(method_name, "Cancel") == 0) {
+			g_dbus_method_invocation_return_value(invocation, NULL);
+			return;
+		}
+		if (dev && dev[0]) {
+			GVariant *r = g_dbus_connection_call_sync(
+				app->sys_bus, "org.bluez", dev,
+				"org.freedesktop.DBus.Properties", "Set",
+				g_variant_new("(ssv)", "org.bluez.Device1",
+					      "Trusted", g_variant_new_boolean(TRUE)),
+				NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+			if (r)
+				g_variant_unref(r);
+		}
+		LOG("[bluez] Agent1.%s auto-accepted (%s)", method_name, dev ? dev : "-");
+		g_dbus_method_invocation_return_value(invocation, NULL);
+		return;
+	}
+
 	if (strcmp(method_name, "Release") == 0) {
 		LOG("[bluez] Profile1.Release called");
 		close_rfcomm(app);
@@ -621,6 +667,18 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 			fd, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL,
 			on_rfcomm_io, app);
 
+		/* Auto-trust peer device so future RFCOMM/AVRCP connections never fail authorization */
+		if (app->device_path[0]) {
+			GVariant *r = g_dbus_connection_call_sync(
+				app->sys_bus, "org.bluez", app->device_path,
+				"org.freedesktop.DBus.Properties", "Set",
+				g_variant_new("(ssv)", "org.bluez.Device1",
+					      "Trusted", g_variant_new_boolean(TRUE)),
+				NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+			if (r)
+				g_variant_unref(r);
+		}
+
 		LOG("[bluez] NewConnection dev=%s peer=%s fd=%d",
 		    app->device_path, app->peer_addr, fd);
 		g_dbus_method_invocation_return_value(invocation, NULL);
@@ -639,6 +697,8 @@ static void register_bluez_profile(struct hfp_app *app)
 	g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
 	g_variant_builder_add(&b, "{sv}", "Name", g_variant_new_string("Handsfree"));
 	g_variant_builder_add(&b, "{sv}", "AutoConnect", g_variant_new_boolean(TRUE));
+	g_variant_builder_add(&b, "{sv}", "RequireAuthentication", g_variant_new_boolean(FALSE));
+	g_variant_builder_add(&b, "{sv}", "RequireAuthorization", g_variant_new_boolean(FALSE));
 	g_variant_builder_add(&b, "{sv}", "Version", g_variant_new_uint16(0x0107));
 	g_variant_builder_add(&b, "{sv}", "Features", g_variant_new_uint16(0x0017));
 
@@ -673,6 +733,29 @@ static bool set_adapter_prop(struct hfp_app *app, const char *prop, GVariant *va
 	}
 	g_variant_unref(res);
 	return true;
+}
+
+static void configure_bluez_agent(struct hfp_app *app)
+{
+	GError *err = NULL;
+	GVariant *res = g_dbus_connection_call_sync(
+		app->sys_bus, "org.bluez", "/org/bluez",
+		"org.bluez.AgentManager1", "RegisterAgent",
+		g_variant_new("(os)", PROFILE_OBJ_PATH, "NoInputNoOutput"),
+		NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
+	if (res) {
+		g_variant_unref(res);
+		res = g_dbus_connection_call_sync(
+			app->sys_bus, "org.bluez", "/org/bluez",
+			"org.bluez.AgentManager1", "RequestDefaultAgent",
+			g_variant_new("(o)", PROFILE_OBJ_PATH),
+			NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, NULL);
+		if (res)
+			g_variant_unref(res);
+		LOG("[bluez] Registered default NoInputNoOutput pairing/authorization agent");
+	} else {
+		g_clear_error(&err);
+	}
 }
 
 static bool configure_bluez_adapter(struct hfp_app *app)
@@ -710,6 +793,39 @@ static gboolean on_adapter_retry(gpointer user_data)
 	return G_SOURCE_CONTINUE;
 }
 
+static void trust_all_known_devices(struct hfp_app *app)
+{
+	GError *err = NULL;
+	GVariant *res = g_dbus_connection_call_sync(
+		app->sys_bus, "org.bluez", "/",
+		"org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+		NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+		G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
+	if (!res) {
+		g_clear_error(&err);
+		return;
+	}
+
+	GVariantIter *obj_iter = NULL;
+	const gchar *obj_path = NULL;
+	GVariant *ifaces = NULL;
+	g_variant_get(res, "(a{oa{sa{sv}}})", &obj_iter);
+	while (g_variant_iter_loop(obj_iter, "{&o@a{sa{sv}}}", &obj_path, &ifaces)) {
+		if (strstr(obj_path, "/org/bluez/hci0/dev_") != NULL) {
+			GVariant *r = g_dbus_connection_call_sync(
+				app->sys_bus, "org.bluez", obj_path,
+				"org.freedesktop.DBus.Properties", "Set",
+				g_variant_new("(ssv)", "org.bluez.Device1",
+					      "Trusted", g_variant_new_boolean(TRUE)),
+				NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+			if (r)
+				g_variant_unref(r);
+		}
+	}
+	g_variant_iter_free(obj_iter);
+	g_variant_unref(res);
+}
+
 static void on_bluez_appeared(GDBusConnection *conn, const gchar *name,
 			      const gchar *owner, gpointer user_data)
 {
@@ -718,6 +834,8 @@ static void on_bluez_appeared(GDBusConnection *conn, const gchar *name,
 	(void)name;
 	(void)owner;
 	register_bluez_profile(app);
+	configure_bluez_agent(app);
+	trust_all_known_devices(app);
 	if (!configure_bluez_adapter(app) && app->adapter_timer_id == 0) {
 		app->adapter_retries = 0;
 		app->adapter_timer_id =
@@ -966,6 +1084,68 @@ static void setup_jack_listener(struct hfp_app *app)
 	LOG("[jack] monitoring wired headset jack on %s", JACK_EVDEV_PATH);
 }
 
+#define SLIDE_EVDEV_PATH "/dev/input/by-path/platform-gpio-keys-event"
+#define KBD_LED_PATH "/sys/class/leds/white:kbd_backlight/brightness"
+
+static void set_kbd_backlight(bool on)
+{
+	int fd = open(KBD_LED_PATH, O_WRONLY | O_CLOEXEC);
+
+	if (fd >= 0) {
+		(void)write(fd, on ? "1\n" : "0\n", 2);
+		close(fd);
+	}
+}
+
+static void apply_slide_state(struct hfp_app *app, bool open_state)
+{
+	set_kbd_backlight(open_state);
+	if (app->rfcomm_fd >= 0) {
+		if (open_state && app->val_callsetup == 1) {
+			LOG("[slide] keypad slid open during incoming call -> ATA");
+			queue_at(app, "ATA");
+		} else if (!open_state && (app->val_call == 1 || app->val_callsetup >= 1)) {
+			LOG("[slide] keypad slid closed during call -> AT+CHUP");
+			queue_at(app, "AT+CHUP");
+		}
+	}
+}
+
+static gboolean on_slide_io(GIOChannel *src, GIOCondition cond, gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	int fd = g_io_channel_unix_get_fd(src);
+	struct input_event ev;
+
+	if (cond & (G_IO_HUP | G_IO_ERR | G_IO_NVAL))
+		return G_SOURCE_REMOVE;
+
+	while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+		if (ev.type == EV_SW && ev.code == SW_KEYPAD_SLIDE)
+			apply_slide_state(app, ev.value != 0);
+	}
+	return G_SOURCE_CONTINUE;
+}
+
+static void setup_slide_listener(struct hfp_app *app)
+{
+	unsigned long sw_bits[(SW_MAX + 8 * sizeof(unsigned long)) / (8 * sizeof(unsigned long))] = { 0 };
+	int fd = open(SLIDE_EVDEV_PATH, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+
+	if (fd < 0)
+		return;
+	app->slide_fd = fd;
+	app->slide_watch_id =
+		watch_fd(fd, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, on_slide_io, app);
+
+	if (ioctl(fd, EVIOCGSW(sizeof(sw_bits)), sw_bits) >= 0) {
+		bool is_open = (sw_bits[SW_KEYPAD_SLIDE / (8 * sizeof(unsigned long))] >>
+				(SW_KEYPAD_SLIDE % (8 * sizeof(unsigned long)))) & 1UL;
+		set_kbd_backlight(is_open);
+	}
+	LOG("[slide] monitoring keypad slider on %s", SLIDE_EVDEV_PATH);
+}
+
 static int send_ctl_cli(const char *sock_path, int argc, char **argv, int start)
 {
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
@@ -1014,6 +1194,7 @@ int main(int argc, char **argv)
 		.sco_listen_fd = -1,
 		.ctl_listen_fd = -1,
 		.jack_fd = -1,
+		.slide_fd = -1,
 	};
 	struct alsa_bridge_cfg bcfg = {
 		.output_mode = OUTPUT_EARPIECE,
@@ -1064,6 +1245,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	setup_jack_listener(&app);
+	setup_slide_listener(&app);
 
 	app.sys_bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &err);
 	if (!app.sys_bus) {
@@ -1081,6 +1263,11 @@ int main(int argc, char **argv)
 	app.reg_id = g_dbus_connection_register_object(
 		app.sys_bus, PROFILE_OBJ_PATH, introspection->interfaces[0],
 		&vtable, &app, NULL, &err);
+	if (app.reg_id != 0 && introspection->interfaces[1]) {
+		g_dbus_connection_register_object(
+			app.sys_bus, PROFILE_OBJ_PATH, introspection->interfaces[1],
+			&vtable, &app, NULL, NULL);
+	}
 	g_dbus_node_info_unref(introspection);
 	if (app.reg_id == 0) {
 		LOG("Register object failed: %s", err ? err->message : "unknown");
@@ -1123,6 +1310,10 @@ out:
 		g_source_remove(app.jack_watch_id);
 	if (app.jack_fd >= 0)
 		close(app.jack_fd);
+	if (app.slide_watch_id)
+		g_source_remove(app.slide_watch_id);
+	if (app.slide_fd >= 0)
+		close(app.slide_fd);
 	if (app.adapter_timer_id)
 		g_source_remove(app.adapter_timer_id);
 	if (app.bluez_watch_id)

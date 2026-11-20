@@ -1,0 +1,1 @@
+SUBSYSTEM=="leds", KERNEL=="*kbd_backlight*", RUN+="/bin/chmod g+w /sys%p/brightness", RUN+="/bin/chown :wheel /sys%p/brightness"
