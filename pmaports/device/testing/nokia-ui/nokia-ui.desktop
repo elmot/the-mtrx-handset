@@ -1,4 +1,0 @@
-[Desktop Entry]
-Name=Nokia Slint UI
-Exec=env WLR_RENDERER=pixman sway -c /etc/sway/nokia-ui.conf
-Type=Application

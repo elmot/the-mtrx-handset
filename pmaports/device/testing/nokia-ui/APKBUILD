@@ -1,18 +1,20 @@
 # Maintainer:
 pkgname=nokia-ui
 pkgver=0.1.0
-pkgrel=1
-pkgdesc="Minimal Python + Slint UI session for Nokia 8110 4G"
+pkgrel=9
+pkgdesc="Minimal Python + Slint KMS/DRM UI for Nokia 8110 4G"
 url="https://postmarketos.org"
 arch="noarch"
 license="GPL-2.0-only"
 options="!check"
-depends="py3-slint sway"
+depends="font-dejavu font-terminus py3-slint"
+subpackages="$pkgname-openrc"
+install="$pkgname-openrc.post-install"
 source="
 	main.py
 	main.slint
-	nokia-ui.conf
-	nokia-ui.desktop
+	nokia-ui.initd
+	nokia-ui-openrc.post-install
 "
 builddir="$srcdir"
 
@@ -21,14 +23,19 @@ package() {
 		"$pkgdir/usr/share/nokia-ui/main.py"
 	install -Dm644 "$builddir/main.slint" \
 		"$pkgdir/usr/share/nokia-ui/main.slint"
-	install -Dm644 "$builddir/nokia-ui.conf" \
-		"$pkgdir/etc/sway/nokia-ui.conf"
-	install -Dm644 "$builddir/nokia-ui.desktop" \
-		"$pkgdir/usr/share/wayland-sessions/nokia-ui.desktop"
+}
+
+openrc() {
+	install_if="$pkgname=$pkgver-r$pkgrel openrc"
+	install -Dm755 "$builddir/nokia-ui.initd" \
+		"$subpkgdir/etc/init.d/nokia-ui"
+	install -dm755 "$subpkgdir/etc/runlevels/default"
+	ln -s /etc/init.d/nokia-ui \
+		"$subpkgdir/etc/runlevels/default/nokia-ui"
 }
 sha512sums="
-854fec05389473f58c3b653cf42ab2532f97540f8d36e69fcd10a48e6e97b1e5bc70285c400eed0df382c341f7c12ff2db32bb4a5c2ebe531cc09290c8f7b457  main.py
+c67e3cafa58a2e13e621b9355cafc829f540ba079128d28939a112c9b9cea1c6ecd0d7a60f56c9fb239545244562a2e244d41a434dda1b812eceb2d089b6e29d  main.py
 6f4db9a8679a3cdd94b18e5b24e64a7092be37ae0fb655e20a86835492da1f3ad9900fd97a5c1f1ac27fb1174a2e97cf1bc3fca9eab3f71b03f4d42c1fffa120  main.slint
-bb4ac1c5f3f9707598fcd8a316c74a0ffc231c71619c460a7b5433f2c50dc0c34d8e06eb482a2a85acf18695be574cc187dbe44c95f212128f8d434225d15f9d  nokia-ui.conf
-ef603931026f27cb28d3d3d3ca9488704688ab9c956cea53167f35c425dc226aab7c0c3bc85e5ca780d14e2b216a3ae40c187022e0b80e3f293ee257f130f269  nokia-ui.desktop
+735d7a542398cb5fdfc734c71fee044ec8f95df09ce83d249f066470b14eb5ab51a81f636e0d188e387dba26dec13d8096480d1f8978a47fea118c88f134083e  nokia-ui.initd
+b2bfe6d658ab4dd0f63dba59d9b03ba571785b94fd607d33865879ebedfef21ccc16af2d478b45f724fe77a90d0751ca14dc8fed839aea96639cfd0fa673e2d8  nokia-ui-openrc.post-install
 "

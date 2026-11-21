@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+
+name="nokia-bt-hfp"
+description="Nokia 8110 4G Bluetooth HFP-HF + Q6AFE INT_BT_SCO Audio Bridge"
+command="/usr/bin/nokia-bt-hfp"
+command_args="--earpiece --mic dual"
+command_user="elmot:elmot"
+command_background=true
+pidfile="/run/nokia-bt-hfp.pid"
+
+depend() {
+	need dbus bluetooth
+	after localmount
+}
+
+start_pre() {
+	mkdir -p /run/user/10000
+	chown 10000:10000 /run/user/10000
+	chmod 700 /run/user/10000
+	export XDG_RUNTIME_DIR="/run/user/10000"
+}

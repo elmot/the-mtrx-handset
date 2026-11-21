@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+name="nokia-ui"
+description="Nokia 8110 4G Slint UI (KMS/DRM)"
+command="/usr/bin/python3"
+command_args="/usr/share/nokia-ui/main.py"
+command_background=true
+pidfile="/run/nokia-ui.pid"
+
+depend() {
+	need dbus
+	after localmount
+}
+
+start_pre() {
+	export SLINT_BACKEND="linuxkms-software"
+	export XDG_RUNTIME_DIR="/run/user/10000"
+	echo 14 > /sys/class/backlight/backlight/brightness 2>/dev/null || true
+}

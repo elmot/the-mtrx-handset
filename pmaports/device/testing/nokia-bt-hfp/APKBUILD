@@ -1,21 +1,23 @@
 # Maintainer:
 pkgname=nokia-bt-hfp
 pkgver=0.1.0
-pkgrel=8
+pkgrel=11
 pkgdesc="Nokia 8110 4G Bluetooth HFP-HF + Q6AFE INT_BT_SCO audio bridge with dual-mic noise cancellation"
 url="https://postmarketos.org"
 arch="armv7"
 license="GPL-2.0-only"
 options="!check"
-# shared libs (alsa-lib, glib, speexdsp) are picked up automatically as so: deps;
-# pactl/notify-send are invoked at runtime
 depends="bluez libnotify pipewire pipewire-pulse pulseaudio-utils wireplumber"
 makedepends="alsa-lib-dev glib-dev speexdsp-dev"
+subpackages="$pkgname-openrc $pkgname-systemd"
+install="$pkgname-openrc.post-install"
 source="
 	Makefile
 	alsa_bridge.c
 	alsa_bridge.h
 	nokia_bt_hfp.c
+	nokia-bt-hfp.initd
+	nokia-bt-hfp-openrc.post-install
 	nokia-bt-hfp.service
 	85-nokia-bt-hfp.preset
 	nokia-bt-hfp-dbus.conf
@@ -31,16 +33,6 @@ build() {
 package() {
 	make DESTDIR="$pkgdir" install
 
-	install -Dm644 "$builddir/nokia-bt-hfp.service" \
-		"$pkgdir/usr/lib/systemd/user/nokia-bt-hfp.service"
-
-	install -Dm644 "$builddir/85-nokia-bt-hfp.preset" \
-		"$pkgdir/usr/lib/systemd/user-preset/85-nokia-bt-hfp.preset"
-
-	install -dm755 "$pkgdir/usr/lib/systemd/user/default.target.wants"
-	ln -s ../nokia-bt-hfp.service \
-		"$pkgdir/usr/lib/systemd/user/default.target.wants/nokia-bt-hfp.service"
-
 	install -Dm644 "$builddir/nokia-bt-hfp-dbus.conf" \
 		"$pkgdir/usr/share/dbus-1/system.d/nokia-bt-hfp.conf"
 
@@ -50,14 +42,37 @@ package() {
 	install -Dm644 "$builddir/50-nokia-bluez-handset.conf" \
 		"$pkgdir/usr/share/wireplumber/wireplumber.conf.d/50-nokia-bluez-handset.conf"
 }
+
+openrc() {
+	install_if="$pkgname=$pkgver-r$pkgrel openrc"
+	install="$subpkgname.post-install"
+	depends="bluez-openrc"
+	install -Dm755 "$builddir/nokia-bt-hfp.initd" \
+		"$subpkgdir/etc/init.d/nokia-bt-hfp"
+}
+
+systemd() {
+	install_if="$pkgname=$pkgver-r$pkgrel systemd"
+	install -Dm644 "$builddir/nokia-bt-hfp.service" \
+		"$subpkgdir/usr/lib/systemd/user/nokia-bt-hfp.service"
+
+	install -Dm644 "$builddir/85-nokia-bt-hfp.preset" \
+		"$subpkgdir/usr/lib/systemd/user-preset/85-nokia-bt-hfp.preset"
+
+	install -dm755 "$subpkgdir/usr/lib/systemd/user/default.target.wants"
+	ln -s ../nokia-bt-hfp.service \
+		"$subpkgdir/usr/lib/systemd/user/default.target.wants/nokia-bt-hfp.service"
+}
 sha512sums="
 c2dce8c6b8af0b5b371ba9e32aeb2d4f26a45a5f62d9621ddff39e7b19d7a684f618d4fd53f7daba539f597b8d7e77cdf160a1d28f31c1fdedcf0cd1b1e09451  Makefile
 31bb8c9c72321eea1f9c8a07baf499dbfd96055edd5b7468a564f34c96ca06e0ae8baa034374a5004636cb0c2c56d0d996ebee9d541364c4e472d52afdad9086  alsa_bridge.c
 700fb46b802f1a03b01affaed2c5ab8e92228be5f10415ce487e205c8a1cd926eb4cf4c366dd24b5a93a701fd8119ee582c6c167ff3288bb7d46be0e86795f92  alsa_bridge.h
-519c73236357e2e1e955f657eb88d39ddaca7582015e89d87b748729e7d52f0200a1398dcfdb7b1145d7f6ccfb710c1654a893794d87517ef5488fe8b17747ec  nokia_bt_hfp.c
+51cd753c4c592a0c4d3edc8d92927a52cccecd5ce425822eba09c9896e5d3e44d820667e71e9eff7c7f41f7833277fe23b2c75ff43ea249dcf9ec4ce284a1a12  nokia_bt_hfp.c
+7b3d41a85da136d2acd886b9a6c463d10aeee61164b850f9be6b501feb6586e94343cca5664a0dfd347214dfa5afcccf82850849a394a930c6bfdbfcac719590  nokia-bt-hfp.initd
+4f9da285efbd4ee4c993563e9d71150b500e28fbcd6e21090cab8b5b0f752825fba8dc351eea85296496eb63d50683790840ad400910e1abde342dc8eada4bec  nokia-bt-hfp-openrc.post-install
 dffe8962417836c14ee4f372a50067a166398a98029701ce53dd4873bc14576fc1eaffe3ab8d773681d89e08014873218b2b192ef6bf79288d5a246b5e5296a3  nokia-bt-hfp.service
 a36b8201300d4efb78bd75553078dab19600a9524d88c6837b2bb665c3ebeef5835b1d8b0a0fe7bf942e084fee783d4f2127dea17edc885c2d40b7f133bd8729  85-nokia-bt-hfp.preset
-4f7379e347ef724cef54a54c4c9fbd50b70f552baeec8d53be1e006237cf897dec3c7dbe322c7b98ec4bfa58ae91a566e9574c07ae51f3077578bf7e4ad226b9  nokia-bt-hfp-dbus.conf
+aaf87ea527b2a010ee4b07218cdc23bb55c283b50d1e617597ee731d750454d5a0e7ea6b2925e13561cbf89adf51ced93b86078366148648264a95694d15632b  nokia-bt-hfp-dbus.conf
 126854883b851ed0e3eb0a00d6db638632168594b765fb521f89a8bf0895d42b174dc0eb121fbc616d57d086568c348d5ebe824fe5d93cb36e9209b24ba1bb71  50-nokia-bt-quantum.conf
 457c1a366d8c3c14a5a76cbc11ea7c4c2fbf31424d7246ba57cd2a07cf771a767fc632b0bf66e55e58a23eb4d4281604a4ed57798ee7047aa757eae07bf50279  50-nokia-bluez-handset.conf
 "

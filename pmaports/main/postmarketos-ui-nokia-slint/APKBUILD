@@ -1,0 +1,33 @@
+# Maintainer:
+pkgname=postmarketos-ui-nokia-slint
+pkgver=0.1.0
+pkgrel=3
+pkgdesc="Minimal Python + Slint KMS/DRM UI for Nokia 8110 4G (OpenRC, no Wayland/X11/systemd)"
+url="https://postmarketos.org"
+arch="noarch"
+license="GPL-2.0-only"
+options="!check pmb:drm"
+depends="
+	bluez
+	font-dejavu
+	font-terminus
+	nokia-bt-hfp
+	nokia-ui
+"
+subpackages="$pkgname-openrc"
+
+package() {
+	mkdir -p "$pkgdir"
+}
+
+openrc() {
+	pkgdesc="$pkgdesc (openrc)"
+	install_if="$pkgname=$pkgver-r$pkgrel openrc"
+	depends="
+		bluez-openrc
+		nokia-bt-hfp-openrc
+		nokia-ui-openrc
+		openrc
+	"
+	mkdir -p "$subpkgdir"
+}

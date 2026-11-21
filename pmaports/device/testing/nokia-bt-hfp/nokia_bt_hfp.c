@@ -1019,7 +1019,7 @@ static int setup_ctl_socket(struct hfp_app *app)
 		return -errno;
 
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", app->ctl_sock_path);
-	old_umask = umask(0077); /* socket owner-only, even under /tmp */
+	old_umask = umask(0007);
 	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
 	    listen(fd, 8) < 0) {
 		umask(old_umask);
@@ -1027,6 +1027,7 @@ static int setup_ctl_socket(struct hfp_app *app)
 		return -errno;
 	}
 	umask(old_umask);
+	chmod(app->ctl_sock_path, 0666);
 
 	app->ctl_listen_fd = fd;
 	app->ctl_watch_id =

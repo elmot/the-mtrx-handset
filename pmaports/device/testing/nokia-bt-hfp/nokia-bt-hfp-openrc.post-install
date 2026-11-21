@@ -1,0 +1,4 @@
+#!/bin/sh
+rc-update add bluetooth default >/dev/null 2>&1 || true
+rc-update add nokia-bt-hfp default >/dev/null 2>&1 || true
+exit 0
