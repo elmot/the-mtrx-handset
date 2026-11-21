@@ -1,0 +1,34 @@
+# Maintainer:
+pkgname=nokia-ui
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Minimal Python + Slint UI session for Nokia 8110 4G"
+url="https://postmarketos.org"
+arch="noarch"
+license="GPL-2.0-only"
+options="!check"
+depends="py3-slint sway"
+source="
+	main.py
+	main.slint
+	nokia-ui.conf
+	nokia-ui.desktop
+"
+builddir="$srcdir"
+
+package() {
+	install -Dm755 "$builddir/main.py" \
+		"$pkgdir/usr/share/nokia-ui/main.py"
+	install -Dm644 "$builddir/main.slint" \
+		"$pkgdir/usr/share/nokia-ui/main.slint"
+	install -Dm644 "$builddir/nokia-ui.conf" \
+		"$pkgdir/etc/sway/nokia-ui.conf"
+	install -Dm644 "$builddir/nokia-ui.desktop" \
+		"$pkgdir/usr/share/wayland-sessions/nokia-ui.desktop"
+}
+sha512sums="
+854fec05389473f58c3b653cf42ab2532f97540f8d36e69fcd10a48e6e97b1e5bc70285c400eed0df382c341f7c12ff2db32bb4a5c2ebe531cc09290c8f7b457  main.py
+6f4db9a8679a3cdd94b18e5b24e64a7092be37ae0fb655e20a86835492da1f3ad9900fd97a5c1f1ac27fb1174a2e97cf1bc3fca9eab3f71b03f4d42c1fffa120  main.slint
+bb4ac1c5f3f9707598fcd8a316c74a0ffc231c71619c460a7b5433f2c50dc0c34d8e06eb482a2a85acf18695be574cc187dbe44c95f212128f8d434225d15f9d  nokia-ui.conf
+ef603931026f27cb28d3d3d3ca9488704688ab9c956cea53167f35c425dc226aab7c0c3bc85e5ca780d14e2b216a3ae40c187022e0b80e3f293ee257f130f269  nokia-ui.desktop
+"
