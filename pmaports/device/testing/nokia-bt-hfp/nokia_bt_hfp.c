@@ -155,11 +155,31 @@ static void get_ctl_sock_path(char *out, size_t sz)
 		 (xdg && xdg[0]) ? xdg : "/tmp");
 }
 
+static void emit_hfp_state(struct hfp_app *app)
+{
+	const char *state = "idle";
+
+	if (!app->sys_bus)
+		return;
+	if (app->val_call == 1)
+		state = "active";
+	else if (app->val_callsetup == 1)
+		state = "incoming";
+	g_dbus_connection_emit_signal(
+		app->sys_bus, NULL, PROFILE_OBJ_PATH,
+		"org.nokia.BtHfp", "CallState",
+		g_variant_new("(bss)", app->rfcomm_fd >= 0, state,
+			      app->caller_id),
+		NULL);
+}
+
 static void run_call_hook(struct hfp_app *app, const char *event)
 {
 	const char *home = getenv("HOME");
 	char hook[256];
 	struct stat st;
+
+	emit_hfp_state(app);
 
 	if (home && home[0]) {
 		snprintf(hook, sizeof(hook), "%s/.config/nokia-bt-hfp/hook", home);
@@ -425,6 +445,7 @@ static void close_rfcomm(struct hfp_app *app)
 	app->slc_ready = false;
 	app->val_call = app->val_callsetup = app->val_callheld = 0;
 	app->device_path[0] = app->peer_addr[0] = app->caller_id[0] = '\0';
+	emit_hfp_state(app);
 }
 
 static gboolean on_rfcomm_io(GIOChannel *src, GIOCondition cond, gpointer user_data)
@@ -679,6 +700,7 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 		g_dbus_method_invocation_return_value(invocation, NULL);
 
 		/* Initiate HFP 1.7 SLC: bits 0|1|2|4|5|7 = 183 */
+		emit_hfp_state(app);
 		queue_at(app, "AT+BRSF=183");
 	}
 }
