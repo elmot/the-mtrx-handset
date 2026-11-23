@@ -3,6 +3,7 @@
 **Target:** Nokia 8110 4G (`nokia-argon`, Qualcomm MSM8905/MSM8909 + PM8909 PMIC)  
 **OS / Kernel:** Nura OS `v26.06` (`linux-postmarketos-qcom-msm8916`, Linux `6.12.1-msm8916`, `armv7`)  
 **Constraint:** Pure Device Tree + ALSA mixer configuration (zero C code changes).
+**Scope:** Base audio bring-up uses pure Device Tree + ALSA mixer configuration; BT-SCO (`INT_BT_SCO_RX`/`TX`) and HFP hands-free routing add kernel `q6afe` patches and the `nokia-bt-hfp` userspace daemon.
 
 ---
 
@@ -17,13 +18,17 @@ The Nokia 8110 4G uses the **PM8909** internal analog codec (`qcom,pm8916-wcd-an
 | **3.5mm Stereo Headphones** | `PRI_MI2S_RX` &rarr; `RX1` (`HPHL`) / `RX2` (`HPHR`) | **Working** | Audibly confirmed true stereo (isolated Left 440 Hz / Right 880 Hz) |
 | **Primary Mic** (bottom slider) | `AMIC1` &rarr; `ADC1` &rarr; `DEC1` &rarr; `TERT_MI2S_TX` | **Working** | Peak `32768` (`0.0 dBFS`), RMS `−39.4 dBFS` on claps (headset unplugged) |
 | **Secondary Mic** (top/rear ambient) | `AMIC3` &rarr; `ADC2 (INP3)` &rarr; `DEC1` &rarr; `TERT_MI2S_TX` | **Working** | Peak `22208` (`−3.4 dBFS`), RMS `−41.2 dBFS` on claps (headset unplugged) |
-| **3.5mm Headset Mic** | `AMIC2` &rarr; `ADC2 (INP2)` &rarr; `DEC1` &rarr; `TERT_MI2S_TX` | **Closed / Silent** | Jack insert detected (`/dev/input/event5`, `0x0014`), but capture remains at noise floor (`−73 dBFS`) |
+| **3.5mm Headset Mic** | `AMIC2` &rarr; `ADC2 (INP2)` &rarr; `DEC1` &rarr; `TERT_MI2S_TX` | **Closed / Silent** | Jack insert detected (`/dev/input/by-path/platform-7702000.sound-event`), but capture remains at noise floor (`−73 dBFS`) |
+| **Bluetooth SCO (HFP-HF)** | `INT_BT_SCO_RX` / `INT_BT_SCO_TX` (`MultiMedia1` / `MultiMedia5`) | **Working** | Bidirectional 8 kHz/16 kHz HFP audio via `nokia-bt-hfp` |
 
 ---
 
-## 2. Key Device Tree & Clocking Findings
+## 2. Key Device Tree & Kernel Patches
 
-Full patch: [`docs/nokia-argon-audio-dts.patch`](nokia-argon-audio-dts.patch) (modifying `qcom-msm8909.dtsi` and `qcom-msm8905-nokia-argon.dts`).
+Base audio patch: [`0001-nokia-argon-audio-dts.patch`](../pmaports/device/testing/linux-postmarketos-qcom-msm8916/0001-nokia-argon-audio-dts.patch) (modifying `qcom-msm8905-nokia-argon.dts`, `qcom-msm8909-pm8909.dtsi`, `qcom-msm8909.dtsi`, and `qcom-pm8909.dtsi`).  
+BT-SCO & keypad slide patches: 
+[`0002-ASoC-qcom-qdsp6-add-INT_BT_SCO-ports.patch`](../pmaports/device/testing/linux-postmarketos-qcom-msm8916/0002-ASoC-qcom-qdsp6-add-INT_BT_SCO-ports.patch) and 
+[`0003-ARM-dts-qcom-nokia-argon-enable-INT_BT_SCO.patch`](../pmaports/device/testing/linux-postmarketos-qcom-msm8916/0003-ARM-dts-qcom-nokia-argon-enable-INT_BT_SCO.patch).
 
 ### 2.1 Hexagon DSP Clocking (Pure-DTS Workaround for AVS 2.7/2.8)
 On MSM8909 (`pm8909` / `lpass_codec`), `aplay` initially failed with `hw_ptr: 0` / `I/O error` because `q6afe` requires explicit v2 IBIT/MCLK clock enablement via `&q6afecc`:
@@ -36,20 +41,22 @@ On MSM8909 (`pm8909` / `lpass_codec`), `aplay` initially failed with `hw_ptr: 0`
 - `&pm8909_codec`: `qcom,micbias-lvl = <2800>`, `qcom,hphl-jack-type-normally-open`, `qcom,micbias1-ext-cap`, `qcom,micbias2-ext-cap`, and MBHC button thresholds `<75 150 237 450 500>`.
 - `&q6afedai`: `PRIMARY_MI2S_RX` (`dai@16`) and `TERTIARY_MI2S_TX` (`dai@20`), both with `qcom,sd-lines = <0 1>`.
 - `&sound`: `qcom,msm8916-qdsp6-sndcard`, pinctrl `cdc_pdm_default` / `cdc_pdm_sleep` (`gpio59`–`gpio64`), frontends `MultiMedia1`–`MultiMedia3` + `MultiMedia5` (compress), and `audio-routing` connecting `AMIC1`/`AMIC3` to `MIC BIAS External1` and `AMIC2` to `MIC BIAS Internal2`.
+- `&q6afedai`: `PRIMARY_MI2S_RX` (`dai@16`), `TERTIARY_MI2S_TX` (`dai@20`) with `qcom,sd-lines = <0 1>`, plus `INT_BT_SCO_RX` (`dai@136`) and `INT_BT_SCO_TX` (`dai@137`).
+- `&sound`: `qcom,msm8916-qdsp6-sndcard`, pinctrl `cdc_pdm_default` / `cdc_pdm_sleep` (`gpio59`–`gpio64`), frontends `MultiMedia1`–`MultiMedia3`, `MultiMedia4` (compress), `MultiMedia5` (`Q6ASM_DAI_TX`), and `CS-Voice`, plus `audio-routing` connecting `AMIC1`/`AMIC3` to `MIC BIAS External1` and `AMIC2` to `MIC BIAS Internal2`.
 
 ---
 
-## 3. Stock KaiOS Capture Analysis (`bananaphone-audio-settings/`)
+## 3. Stock KaiOS Capture Analysis (Historical Reference)
 
-Dumps captured on stock KaiOS (`msm8909-skub-snd-card`) via `params.sh`:
-- `call-earpiece.txt`, `call-loud.txt`, and `call-ext-earpiece.txt` all use:
+Dumps captured earlier on stock KaiOS (`msm8909-skub-snd-card`) via `params.sh`:
+- `call-earpiece.txt`, `call-loud.txt`, and `call-ext-earpiece.txt` all used:
   - **Voice Uplink:** `DEC1 MUX = ADC2`, `ADC2 MUX = INP3` (**`AMIC3`**, the top/rear internal microphone). Stock firmware never used `AMIC1` in any captured call, and even in `call-ext-earpiece.txt` (call with headphones on `HPHL`/`HPHR`), uplink remained on `AMIC3` (`INP3`) rather than `AMIC2` (`INP2`).
 - `playback-ext-earpiece.txt` / `call-ext-earpiece.txt`: `HPHL Impedance = 35`, `HPHR Impedance = 30`, `HPHL = Switch`, `HPHR = Switch`, `RDAC2 MUX = RX2`.
 - Stock downstream DTS (`msm8905-qrd-skub.dtsi`) maps `AMIC1` ("Handset Mic"), `AMIC2` ("Headset Mic"), and `AMIC3` ("Secondary Mic").
 
 ---
 
-## 4. Verified Mainline ALSA Mixer Routes
+## 3. Verified Mainline ALSA Mixer Routes
 
 All routes use `card 0` (`msm8916`), playback on `hw:0,0` (`MultiMedia1`), capture on `hw:0,1` (`MultiMedia2`).
 
