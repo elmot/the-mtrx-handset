@@ -1,7 +1,7 @@
 # Maintainer:
 pkgname=py3-slint
 pkgver=1.19.0
-pkgrel=0
+pkgrel=1
 pkgdesc="Python bindings for the Slint UI toolkit"
 url="https://slint.dev/"
 arch="armv7 aarch64 x86_64"
@@ -44,6 +44,7 @@ options="!check net" # cargo fetches crates during build
 source="
 	slint-$pkgver.tar.gz::https://github.com/slint-ui/slint/archive/refs/tags/v$pkgver.tar.gz
 	skia-m157.2.tar.gz::https://codeload.github.com/rust-skia/skia/tar.gz/m157.2
+	0001-make-skia-graphics-backends-opt-in.patch
 "
 builddir="$srcdir/slint-$pkgver"
 
@@ -65,9 +66,12 @@ build() {
 		export CXX="/native/usr/lib/crossdirect/armv7/clang++"
 	fi
 	local _cppver="$(g++ -dumpversion)"
-	local _cppinc="-I/usr/include/c++/$_cppver -I/usr/include/c++/$_cppver/armv7-alpine-linux-musleabihf"
+	local _cpptarget="$(g++ -dumpmachine)"
+	local _cppinc="-I/usr/include/c++/$_cppver -I/usr/include/c++/$_cppver/$_cpptarget"
 	export CXXFLAGS="${CXXFLAGS:-} $_cppinc"
 	export BINDGEN_EXTRA_CLANG_ARGS="$_cppinc"
+	export CPLUS_INCLUDE_PATH="/usr/include/c++/$_cppver:/usr/include/c++/$_cppver/$_cpptarget${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+	export SKIA_GN_ARGS="${SKIA_GN_ARGS:+$SKIA_GN_ARGS }extra_cflags_cc=[\"-I/usr/include/c++/$_cppver\",\"-I/usr/include/c++/$_cppver/$_cpptarget\"]"
 	export LIBCLANG_PATH="/usr/lib/llvm22/lib"
 	cargo fetch --manifest-path "$builddir/api/python/slint/Cargo.toml"
 	for _f in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/skia-bindings-*/build_support/skia_bindgen.rs; do
@@ -79,7 +83,8 @@ build() {
 		--release \
 		--strip \
 		--auditwheel=skip \
-		--features backend-linuxkms-libinput,renderer-skia \
+		--no-default-features \
+		--features backend-linuxkms-libinput,backend-winit,renderer-femtovg,renderer-skia-software,accessibility \
 		--out "$builddir/dist"
 }
 
@@ -93,4 +98,5 @@ package() {
 sha512sums="
 bbdc90bc085b8a7e0c1fb489bd2a3550c9d28d50894494b8a7a0e671c51dc058a33ebbffd25f858b5bd4394ca18c39018f9201e436c9bc3fef2bbd94bf61009a  slint-1.19.0.tar.gz
 601dd8c002ce7acd1df9cb56f94fba9b65c6ee77460ae52ce4853d99a81e96cd5253d8057e2ae1c6dcdcb2a8c9389a270e2db8114333941165267775dea07a6b  skia-m157.2.tar.gz
+520fd8db02f4a0561d402922898c254436533e9e9a439451ab302c535227b877ad6b67a3be1e632c3e36a76c74fda161efbd3481176fc6ac83384f64b7d633dc  0001-make-skia-graphics-backends-opt-in.patch
 "

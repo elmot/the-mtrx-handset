@@ -1,0 +1,127 @@
+--- a/api/python/slint/Cargo.toml
++++ b/api/python/slint/Cargo.toml
+@@ -50,4 +50,5 @@
+ renderer-femtovg-wgpu = ["slint-interpreter/renderer-femtovg-wgpu"]
+ renderer-skia = ["slint-interpreter/renderer-skia"]
++renderer-skia-software = ["slint-interpreter/renderer-skia-software"]
+ renderer-skia-opengl = ["slint-interpreter/renderer-skia-opengl"]
+ renderer-skia-vulkan = ["slint-interpreter/renderer-skia-vulkan"]
+--- a/internal/renderers/skia/Cargo.toml
++++ b/internal/renderers/skia/Cargo.toml
+@@ -27,5 +27,5 @@
+ wayland = ["glutin/wayland", "softbuffer/wayland", "softbuffer/wayland-dlopen"]
+ x11 = ["glutin/x11", "glutin/glx", "softbuffer/x11", "softbuffer/x11-dlopen"]
+-opengl = []
++opengl = ["skia-safe/gl"]
+ # `vulkan-portability` is how wgpu compiles its Vulkan backend on Apple platforms (MoltenVK).
+ # It feeds an apple-target-gated dependency of wgpu-core, so it's inert elsewhere.
+@@ -62,5 +62,5 @@
+ bytemuck = { workspace = true }
+ 
+-skia-safe = { version = "0.157.0", features = ["gl"] }
++skia-safe = { version = "0.157.0", features = ["ganesh"] }
+ glow = { workspace = true }
+ unicode-segmentation = { workspace = true }
+@@ -106,5 +106,4 @@
+ 
+ [target.'cfg(not(any(target_vendor = "apple", target_family = "windows")))'.dependencies]
+-skia-safe = { version = "0.157.0", features = ["gl", "vulkan"] }
+ wgpu-29 = { workspace = true, optional = true, features = ["vulkan"] }
+ wgpu-30 = { workspace = true, optional = true, features = ["vulkan"] }
+--- a/internal/renderers/skia/build.rs
++++ b/internal/renderers/skia/build.rs
+@@ -7,14 +7,10 @@
+     // Setup cfg aliases
+     cfg_aliases! {
+-       skia_backend_opengl: { any(feature = "opengl", not(any(target_vendor = "apple", target_family = "windows", target_arch = "wasm32"))) },
++       skia_backend_opengl: { all(feature = "opengl", any(not(target_vendor = "apple"), target_os = "macos")) },
+        skia_backend_wgpu: { any(feature = "wgpu-29", feature = "wgpu-30") },
+        skia_backend_software: { not(target_os = "android") },
+        skia_backend_softbuffer: { all(skia_backend_software, feature = "softbuffer") },
+-       // Targets where wgpu and Skia both have their Vulkan backend compiled in.
+-       // This only happens if wgpu has been enabled, and, on windows an mac only, the "vulkan"
+-       // feature is enabled. On linux and other non-macos unixes, skia_wgpu_vulkan is true by
+-       // default, and enabling "vulkan" feature would only serve to have it prioritized over
+-       // opengl at runtime.
+-       skia_wgpu_vulkan: { all(skia_backend_wgpu, any(all(target_family = "unix", not(target_vendor = "apple")), all(any(target_vendor = "apple", target_family = "windows"), feature = "vulkan"))) },
++       // Build the wgpu/Skia Vulkan bridge only when Skia's Vulkan feature is enabled.
++       skia_wgpu_vulkan: { all(skia_backend_wgpu, feature = "vulkan") },
+        skia_windowed: { any(skia_backend_wgpu, skia_backend_opengl, skia_backend_softbuffer) },
+     }
+--- a/internal/renderers/skia/lib.rs
++++ b/internal/renderers/skia/lib.rs
+@@ -43,5 +43,5 @@
+ pub mod software_surface;
+ 
+-#[cfg(any(not(target_vendor = "apple"), target_os = "macos"))]
++#[cfg(skia_backend_opengl)]
+ pub mod opengl_surface;
+ 
+@@ -341,10 +341,8 @@
+         ("wgpu", vulkan_wgpu_surface_factory),
+         // opengl feature enables but also prioritizes opengl
+-        #[cfg(all(feature = "opengl", any(not(target_vendor = "apple"), target_os = "macos")))]
++        #[cfg(skia_backend_opengl)]
+         ("opengl", surface_factory::<opengl_surface::OpenGLSurface>),
+         #[cfg(skia_backend_wgpu)]
+         ("wgpu", default_wgpu_surface_factory),
+-        #[cfg(all(not(feature = "opengl"), skia_backend_opengl))]
+-        ("opengl", surface_factory::<opengl_surface::OpenGLSurface>),
+         #[cfg(skia_backend_softbuffer)]
+         ("software", surface_factory::<software_surface::SoftwareSurface>),
+@@ -521,5 +519,5 @@
+     }
+ 
+-    #[cfg(any(not(target_vendor = "apple"), target_os = "macos"))]
++    #[cfg(skia_backend_opengl)]
+     /// Creates a new SkiaRenderer that will always use Skia's OpenGL renderer.
+     pub fn default_opengl(context: &SkiaSharedContext) -> Self {
+--- a/internal/backends/winit/build.rs
++++ b/internal/backends/winit/build.rs
+@@ -15,8 +15,9 @@
+        enable_femtovg_renderer: { any(feature = "renderer-femtovg", feature = "renderer-femtovg-wgpu") },
+        enable_accesskit: { all(feature = "accessibility", not(target_arch = "wasm32")) },
++       supports_skia_opengl: { all(feature = "renderer-skia-opengl", not(ios_and_friends)) },
+        supports_opengl: { all(any(feature = "renderer-skia-opengl", feature = "renderer-femtovg"), not(ios_and_friends)) },
+        supports_metal: { all(target_vendor = "apple", enable_skia_wgpu) },
+        supports_direct3d: { all(target_family = "windows", enable_skia_wgpu) },
+-       supports_vulkan: { all(enable_skia_wgpu, any(all(target_family = "unix", not(target_vendor = "apple")), all(any(target_vendor = "apple", target_family = "windows"), feature = "renderer-skia-vulkan"))) },
++       supports_vulkan: { all(enable_skia_wgpu, feature = "renderer-skia-vulkan") },
+        xdg_desktop_settings: { not(any(target_family = "windows", target_vendor = "apple", target_arch = "wasm32", target_os = "android")) },
+        muda: { all(feature = "muda", any(target_os = "windows", target_os = "macos")) },
+--- a/internal/backends/winit/lib.rs
++++ b/internal/backends/winit/lib.rs
+@@ -1366,5 +1366,5 @@
+             )
+         }
+-        #[cfg(all(enable_skia_renderer, supports_opengl))]
++        #[cfg(supports_skia_opengl)]
+         (Some("skia-opengl"), _) => {
+             renderer::skia::WinitSkiaRenderer::new_opengl_suspended(shared_data)
+--- a/internal/backends/winit/renderer/skia.rs
++++ b/internal/backends/winit/renderer/skia.rs
+@@ -49,5 +49,5 @@
+     }
+ 
+-    #[cfg(not(ios_and_friends))]
++    #[cfg(supports_skia_opengl)]
+     pub fn new_opengl_suspended(
+         shared_backend_data: &Rc<crate::SharedBackendData>,
+@@ -124,11 +124,11 @@
+                 match api {
+                     RequestedGraphicsAPI::OpenGL(_) => {
+-                        #[cfg(not(ios_and_friends))]
++                        #[cfg(supports_skia_opengl)]
+                         return Ok(Self::new_opengl_suspended);
+-                        #[cfg(ios_and_friends)]
+-                        return Err(format!(
+-                            "OpenGL rendering requested but this is not supported on iOS"
+-                        )
+-                        .into());
++                        #[cfg(not(supports_skia_opengl))]
++                        return Err(
++                            "OpenGL rendering requested but renderer-skia-opengl is not enabled"
++                                .into(),
++                        );
+                     }
+                     RequestedGraphicsAPI::Metal => {
