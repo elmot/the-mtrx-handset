@@ -13,18 +13,29 @@ import slint
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NOKIA_UI_DIR = REPO_ROOT / "pmaports" / "main" / "nokia-ui"
-MAIN_SLINT = NOKIA_UI_DIR / "main.slint"
+SIMULATOR_SLINT = Path(__file__).resolve().parent / "simulator.slint"
+DEFAULT_PAIRED_DEVICE = "Pixel 8 Pro"
 
 
 class DesktopUiHarness:
-    """Drives nokia-ui's MainWindow with PoC state-machine transitions."""
+    """Drives nokia-ui's MainView and OS Event Simulator in a single Slint window."""
 
     def __init__(self, args: argparse.Namespace) -> None:
-        self.app = slint.load_file(str(MAIN_SLINT))
+        self.app = slint.load_file(
+            str(SIMULATOR_SLINT),
+            include_paths=[str(NOKIA_UI_DIR)],
+        )
         self.ScreenId = self.app.ScreenId
-        self.win = self.app.MainWindow()
+        self.win = self.app.DesktopDevWindow()
         self.cmd_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
         self.prev_screen = self.ScreenId.home
+        self.default_paired_device = args.paired_device or DEFAULT_PAIRED_DEVICE
+        self.default_caller = args.caller
+
+        # Single-shot timers for CALL_ENDED (1.5s) and PAIRING timeout (120s)
+        self.call_ended_timer = slint.Timer()
+        self.pairing_timer = slint.Timer()
+        self.poll_timer = slint.Timer()
 
         # Apply initial state from CLI arguments
         self.win.bt_connected = args.bt_connected
@@ -37,18 +48,38 @@ class DesktopUiHarness:
         self.win.pairing_timed_out = args.pairing_timeout
         self.set_screen(args.screen)
 
-        # Single-shot timers for CALL_ENDED (1.5s) and PAIRING timeout (120s)
-        self.call_ended_timer = slint.Timer()
-        self.pairing_timer = slint.Timer()
-        self.poll_timer = slint.Timer()
-
-        # Bind Slint callbacks
+        # Bind real MainView keyboard / softkey callbacks
         self.win.soft_left = self.on_soft_left
         self.win.soft_right = self.on_soft_right
         self.win.pickup_pressed = self.on_pickup
         self.win.hangup_pressed = self.on_hangup
         self.win.vol_up = lambda: self.adjust_volume(+5)
         self.win.vol_down = lambda: self.adjust_volume(-5)
+
+        # Bind OS Event Simulator panel callbacks
+        self.win.bt_connect = self.on_bt_connect
+        self.win.bt_disconnect = self.on_bt_disconnect
+        self.win.bt_pair = self.on_bt_pair
+        self.win.bt_unpair = self.on_bt_unpair
+        self.win.bt_pair_timeout = self.on_bt_pair_timeout
+        self.win.sim_vol_up = lambda: self.adjust_volume(+5, allow_any_screen=True)
+        self.win.sim_vol_down = lambda: self.adjust_volume(-5, allow_any_screen=True)
+        self.win.slider_open_ev = lambda: self.on_slider_set(True)
+        self.win.slider_closed_ev = lambda: self.on_slider_set(False)
+        self.win.power_pressed = self.on_power_pressed
+        self.win.power_long_pressed = self.on_power_long_pressed
+        self.win.incoming_call = self.on_incoming_call
+        self.win.remote_end_call = self.on_remote_end_call
+
+    def _screen_name(self, screen: object) -> str:
+        for attr in dir(self.ScreenId):
+            if not attr.startswith("_") and getattr(self.ScreenId, attr) == screen:
+                return attr
+        return str(screen)
+
+    def _log(self, msg: str) -> None:
+        print(msg)
+        self.win.last_event = msg
 
     def set_screen(self, name: str) -> None:
         screen = getattr(self.ScreenId, name, None)
@@ -58,7 +89,8 @@ class DesktopUiHarness:
         if self.win.active_screen != self.ScreenId.power_off:
             self.prev_screen = self.win.active_screen
         self.win.active_screen = screen
-        print(f"[ui] screen -> {name}")
+        self.win.active_screen_name = name
+        self._log(f"[ui] screen -> {name}")
 
     def _enter_call_ended(self) -> None:
         self.set_screen("call_ended")
@@ -84,7 +116,9 @@ class DesktopUiHarness:
     def _on_pairing_timeout(self) -> None:
         if self.win.active_screen == self.ScreenId.pairing:
             self.win.pairing_timed_out = True
-            print("[ui] pairing timed out (120s)")
+            self._log("[bt] pairing timed out (120s)")
+
+    # --- Real UI softkey & keypad handlers ---
 
     def on_soft_left(self) -> None:
         cur = self.win.active_screen
@@ -94,18 +128,18 @@ class DesktopUiHarness:
             else:
                 self._start_pairing()
         elif cur == self.ScreenId.incoming_call:
-            print("[hfp] ATA (answer)")
+            self._log("[hfp] ATA (answer)")
             self.set_screen("active_call")
         elif cur == self.ScreenId.active_call:
             self.win.speaker_mode = not self.win.speaker_mode
             sink = "SPEAKER" if self.win.speaker_mode else "EARPIECE"
-            print(f"[audio] sink -> {sink}")
+            self._log(f"[audio] sink -> {sink}")
         elif cur == self.ScreenId.unpair:
             self.set_screen("home")
         elif cur == self.ScreenId.pairing and self.win.pairing_timed_out:
             self._start_pairing()
         elif cur == self.ScreenId.power_off:
-            print("[sys] power off confirmed -> exiting desktop harness")
+            self._log("[sys] power off confirmed -> exiting desktop harness")
             slint.quit_event_loop()
 
     def on_soft_right(self) -> None:
@@ -113,13 +147,13 @@ class DesktopUiHarness:
         if cur == self.ScreenId.home:
             self.set_screen("power_off")
         elif cur == self.ScreenId.incoming_call:
-            print("[hfp] AT+CHUP (reject)")
+            self._log("[hfp] AT+CHUP (reject)")
             self.set_screen("home")
         elif cur == self.ScreenId.active_call:
-            print("[hfp] AT+CHUP (end)")
+            self._log("[hfp] AT+CHUP (end)")
             self._enter_call_ended()
         elif cur == self.ScreenId.unpair:
-            print(f"[bt] unpairing '{self.win.paired_device_name}'")
+            self._log(f"[bt] unpairing '{self.win.paired_device_name}'")
             self.win.paired_device_name = ""
             self.win.bt_connected = False
             self._start_pairing()
@@ -127,34 +161,127 @@ class DesktopUiHarness:
             self.pairing_timer.stop()
             self.set_screen("home")
         elif cur == self.ScreenId.power_off:
+            prev_name = self._screen_name(self.prev_screen)
             self.win.active_screen = self.prev_screen
-            print(f"[ui] power off cancelled -> {self.prev_screen}")
+            self.win.active_screen_name = prev_name
+            self._log(f"[ui] power off cancelled -> {prev_name}")
 
     def on_pickup(self) -> None:
         cur = self.win.active_screen
         if cur == self.ScreenId.home:
-            print("[hfp] ATD; (redial/test call)")
+            self._log("[hfp] ATD; (redial/test call)")
             self.set_screen("active_call")
         elif cur == self.ScreenId.incoming_call:
-            print("[hfp] ATA (answer)")
+            self._log("[hfp] ATA (answer)")
             self.set_screen("active_call")
 
     def on_hangup(self) -> None:
         cur = self.win.active_screen
         if cur == self.ScreenId.incoming_call:
-            print("[hfp] AT+CHUP (reject)")
+            self._log("[hfp] AT+CHUP (reject)")
             self.set_screen("home")
         elif cur == self.ScreenId.active_call:
-            print("[hfp] AT+CHUP (end)")
+            self._log("[hfp] AT+CHUP (end)")
             self._enter_call_ended()
         elif cur in (self.ScreenId.unpair, self.ScreenId.pairing, self.ScreenId.power_off):
             self.pairing_timer.stop()
             self.set_screen("home")
 
-    def adjust_volume(self, delta: int) -> None:
+    # --- Simulated OS event handlers ---
+
+    def on_bt_connect(self) -> None:
+        if not self.win.paired_device_name:
+            self.win.paired_device_name = self.default_paired_device
+        self.win.bt_connected = True
+        if self.win.active_screen == self.ScreenId.pairing:
+            self.pairing_timer.stop()
+            self.set_screen("home")
+        self._log(f"[bt] connected ({self.win.paired_device_name})")
+
+    def on_bt_disconnect(self) -> None:
+        self.win.bt_connected = False
         if self.win.active_screen == self.ScreenId.active_call:
+            self._enter_call_ended()
+        elif self.win.active_screen == self.ScreenId.incoming_call:
+            self.set_screen("home")
+        self._log("[bt] disconnected")
+
+    def on_bt_pair(self, name: str | None = None) -> None:
+        device_name = name or self.default_paired_device
+        self.win.paired_device_name = device_name
+        self.win.bt_connected = True
+        self.win.pairing_timed_out = False
+        self.pairing_timer.stop()
+        if self.win.active_screen in (self.ScreenId.pairing, self.ScreenId.unpair):
+            self.set_screen("home")
+        self._log(f"[bt] paired & connected '{device_name}'")
+
+    def on_bt_unpair(self) -> None:
+        prev = self.win.paired_device_name or "device"
+        self.win.paired_device_name = ""
+        self.win.bt_connected = False
+        if self.win.active_screen == self.ScreenId.active_call:
+            self._enter_call_ended()
+        elif self.win.active_screen in (self.ScreenId.incoming_call, self.ScreenId.unpair):
+            self.set_screen("home")
+        self._log(f"[bt] unpaired '{prev}'")
+
+    def on_bt_pair_timeout(self) -> None:
+        self._on_pairing_timeout()
+
+    def adjust_volume(self, delta: int, *, allow_any_screen: bool = False) -> None:
+        if allow_any_screen or self.win.active_screen == self.ScreenId.active_call:
             self.win.volume_percent = max(0, min(100, self.win.volume_percent + delta))
-            print(f"[audio] volume -> {self.win.volume_percent}%")
+            self._log(f"[audio] volume -> {self.win.volume_percent}%")
+
+    def on_slider_set(self, is_open: bool) -> None:
+        self.win.slider_open = is_open
+        state_str = "OPEN" if is_open else "CLOSED"
+        if is_open:
+            if self.win.active_screen == self.ScreenId.sleep:
+                self.set_screen("home")
+            elif self.win.active_screen == self.ScreenId.incoming_call:
+                self.set_screen("active_call")
+        else:
+            if self.win.active_screen == self.ScreenId.active_call:
+                self._enter_call_ended()
+        self._log(f"[hw] slider -> {state_str}")
+
+    def on_power_pressed(self) -> None:
+        cur = self.win.active_screen
+        if cur == self.ScreenId.incoming_call:
+            self.win.ring_silenced = True
+            self._log("[hw] power pressed -> ring silenced")
+        elif cur == self.ScreenId.home:
+            self.set_screen("sleep")
+            self._log("[hw] power pressed -> sleep")
+        elif cur == self.ScreenId.sleep:
+            self.set_screen("home")
+            self._log("[hw] power pressed -> wake")
+        else:
+            self._log(f"[hw] power pressed (no-op on {self._screen_name(cur)})")
+
+    def on_power_long_pressed(self) -> None:
+        self.set_screen("power_off")
+        self._log("[hw] power long pressed -> power_off")
+
+    def on_incoming_call(self, caller: str | None = None) -> None:
+        self.win.caller_id = caller or self.default_caller
+        self.win.ring_silenced = False
+        self.set_screen("incoming_call")
+        self._log(f"[hfp] incoming call ({self.win.caller_id})")
+
+    def on_remote_end_call(self) -> None:
+        if self.win.active_screen == self.ScreenId.active_call:
+            self._enter_call_ended()
+            self._log("[hfp] remote end -> call_ended")
+        elif self.win.active_screen == self.ScreenId.incoming_call:
+            self.set_screen("home")
+            self._log("[hfp] remote cancel -> home")
+        else:
+            self._log("[hfp] remote end (no active call)")
+
+    # --- Optional stdin CLI (kept for scripting / terminal use) ---
 
     def handle_command(self, line: str) -> None:
         parts = line.strip().split()
@@ -164,63 +291,58 @@ class DesktopUiHarness:
         if cmd in ("quit", "q", "exit"):
             slint.quit_event_loop()
         elif cmd == "ring":
-            self.win.caller_id = " ".join(parts[1:]) if len(parts) > 1 else "+46 70 123 4567"
-            self.win.ring_silenced = False
-            self.set_screen("incoming_call")
+            caller = " ".join(parts[1:]) if len(parts) > 1 else None
+            self.on_incoming_call(caller)
         elif cmd == "silence":
             if self.win.active_screen == self.ScreenId.incoming_call:
                 self.win.ring_silenced = True
-                print("[ui] ring silenced")
+                self._log("[ui] ring silenced")
         elif cmd == "end":
-            if self.win.active_screen == self.ScreenId.active_call:
-                self._enter_call_ended()
-            elif self.win.active_screen == self.ScreenId.incoming_call:
-                self.set_screen("home")
+            self.on_remote_end_call()
         elif cmd == "slider":
-            self.win.slider_open = not self.win.slider_open
-            print(f"[hw] slider_open -> {self.win.slider_open}")
-            if self.win.slider_open:
-                if self.win.active_screen == self.ScreenId.sleep:
-                    self.set_screen("home")
-                elif self.win.active_screen == self.ScreenId.incoming_call:
-                    self.set_screen("active_call")
-            else:
-                if self.win.active_screen == self.ScreenId.active_call:
-                    self._enter_call_ended()
+            self.on_slider_set(not self.win.slider_open)
+        elif cmd == "slider_open":
+            self.on_slider_set(True)
+        elif cmd == "slider_closed":
+            self.on_slider_set(False)
         elif cmd == "bt":
-            self.win.bt_connected = not self.win.bt_connected
-            print(f"[bt] connected -> {self.win.bt_connected}")
-        elif cmd == "pair_ok":
-            name = " ".join(parts[1:]) if len(parts) > 1 else "Pixel 8 Pro"
-            self.win.paired_device_name = name
-            self.win.bt_connected = True
-            self.win.status_banner = f"PAIRED: {name}"
-            self.pairing_timer.stop()
-            self.set_screen("home")
+            if self.win.bt_connected:
+                self.on_bt_disconnect()
+            else:
+                self.on_bt_connect()
+        elif cmd == "bt_connect":
+            self.on_bt_connect()
+        elif cmd == "bt_disconnect":
+            self.on_bt_disconnect()
+        elif cmd in ("pair", "pair_ok"):
+            name = " ".join(parts[1:]) if len(parts) > 1 else None
+            self.on_bt_pair(name)
+        elif cmd == "unpair":
+            self.on_bt_unpair()
         elif cmd == "timeout":
-            self._on_pairing_timeout()
+            self.on_bt_pair_timeout()
+        elif cmd == "vol_up":
+            self.adjust_volume(+5, allow_any_screen=True)
+        elif cmd == "vol_down":
+            self.adjust_volume(-5, allow_any_screen=True)
         elif cmd == "power_short":
-            if self.win.active_screen == self.ScreenId.incoming_call:
-                self.win.ring_silenced = True
-            elif self.win.active_screen == self.ScreenId.home:
-                self.set_screen("sleep")
-            elif self.win.active_screen == self.ScreenId.sleep:
-                self.set_screen("home")
+            self.on_power_pressed()
         elif cmd == "power_long":
-            self.set_screen("power_off")
+            self.on_power_long_pressed()
         elif cmd == "screen" and len(parts) == 2:
             try:
                 self.set_screen(parts[1])
             except ValueError as exc:
-                print(f"[err] {exc}")
+                self._log(f"[err] {exc}")
         elif cmd == "help":
             print(
-                "Commands: ring [caller] | silence | end | slider | bt | "
-                "pair_ok [name] | timeout | power_short | power_long | "
+                "Commands: ring [caller] | silence | end | slider | slider_open | "
+                "slider_closed | bt | bt_connect | bt_disconnect | pair [name] | "
+                "unpair | timeout | vol_up | vol_down | power_short | power_long | "
                 "screen <name> | quit"
             )
         else:
-            print(f"[err] unknown command '{line.strip()}' (type 'help')")
+            self._log(f"[err] unknown command '{line.strip()}' (type 'help')")
 
     def _poll_commands(self) -> None:
         while not self.cmd_queue.empty():
@@ -240,12 +362,15 @@ class DesktopUiHarness:
             timedelta(milliseconds=50),
             self._poll_commands,
         )
-        print(f"Loaded {MAIN_SLINT}")
+        print(f"Loaded Desktop Workbench: {SIMULATOR_SLINT} (UI from {NOKIA_UI_DIR})")
         print(
             "Keys: Left=SoftLeft | Right=SoftRight | Enter=PickUp | "
             "Backspace/Esc=HangUp | Up/Down=Vol+/-"
         )
-        self.win.run()
+        try:
+            self.win.run()
+        except KeyboardInterrupt:
+            pass
         return 0
 
 

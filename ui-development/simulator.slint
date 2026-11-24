@@ -1,0 +1,394 @@
+// Unified desktop development window combining the real production MainView (240x320)
+// with an OS Event Simulator panel for hardware / D-Bus / Bluetooth events not mapped to keys.
+
+import { ScreenId, MainView } from "main_view.slint";
+export { ScreenId }
+
+global SimTheme {
+    out property <color> bg: #080D12;
+    out property <color> panel-bg: #0B1117;
+    out property <color> surface: #141E28;
+    out property <color> surface-hover: #1C2A38;
+    out property <color> surface-pressed: #0F1720;
+    out property <color> border: #253545;
+    out property <color> accent: #00E5FF;
+    out property <color> success: #2EE59D;
+    out property <color> warning: #FFB020;
+    out property <color> danger: #FF5252;
+    out property <color> text-primary: #F4F7FA;
+    out property <color> text-muted: #7D8FA3;
+    out property <color> text-disabled: #4A5868;
+}
+
+component SimButton inherits Rectangle {
+    in property <string> label;
+    in property <color> accent-color: SimTheme.accent;
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+
+    callback clicked();
+
+    height: 30px;
+    horizontal-stretch: 1;
+    border-radius: 6px;
+    border-width: root.active ? 1.5px : 1px;
+    border-color: !root.enabled ? SimTheme.border
+        : root.active ? root.accent-color
+        : ta.has-hover ? root.accent-color
+        : SimTheme.border;
+    background: !root.enabled ? SimTheme.panel-bg
+        : ta.pressed ? SimTheme.surface-pressed
+        : ta.has-hover ? SimTheme.surface-hover
+        : SimTheme.surface;
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        width: 100%;
+        height: 100%;
+        text: root.label;
+        color: !root.enabled ? SimTheme.text-disabled
+            : root.active ? root.accent-color
+            : SimTheme.text-primary;
+        font-size: 12px;
+        font-weight: root.active ? 700 : 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component SectionCard inherits Rectangle {
+    in property <string> title;
+    in property <string> badge-text: "";
+    in property <color> badge-color: SimTheme.text-muted;
+
+    border-radius: 8px;
+    background: SimTheme.surface;
+    border-width: 1px;
+    border-color: SimTheme.border;
+
+    VerticalLayout {
+        padding: 9px;
+        spacing: 7px;
+
+        HorizontalLayout {
+            alignment: space-between;
+
+            Text {
+                text: root.title;
+                color: SimTheme.text-muted;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.8px;
+                vertical-alignment: center;
+            }
+
+            if root.badge-text != "": Text {
+                text: root.badge-text;
+                color: root.badge-color;
+                font-size: 11px;
+                font-weight: 700;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        @children
+    }
+}
+
+export component DesktopDevWindow inherits Window {
+    title: "Nokia 8110 4G — Desktop UI & OS Event Simulator";
+    background: SimTheme.bg;
+
+    // Forwarded production MainView properties
+    in-out property <ScreenId> active-screen <=> phone-view.active-screen;
+    in-out property <bool> bt-connected <=> phone-view.bt-connected;
+    in-out property <string> paired-device-name <=> phone-view.paired-device-name;
+    in-out property <string> local-bt-name <=> phone-view.local-bt-name;
+    in-out property <bool> slider-open <=> phone-view.slider-open;
+    in-out property <int> battery-percent <=> phone-view.battery-percent;
+    in-out property <string> caller-id <=> phone-view.caller-id;
+    in-out property <bool> ring-silenced <=> phone-view.ring-silenced;
+    in-out property <bool> speaker-mode <=> phone-view.speaker-mode;
+    in-out property <int> volume-percent <=> phone-view.volume-percent;
+    in-out property <bool> pairing-timed-out <=> phone-view.pairing-timed-out;
+
+    // Forwarded production MainView keyboard/softkey callbacks
+    callback soft-left <=> phone-view.soft-left;
+    callback soft-right <=> phone-view.soft-right;
+    callback pickup-pressed <=> phone-view.pickup-pressed;
+    callback hangup-pressed <=> phone-view.hangup-pressed;
+    callback vol-up <=> phone-view.vol-up;
+    callback vol-down <=> phone-view.vol-down;
+
+    // Simulator display state
+    in property <string> active-screen-name: "home";
+    in property <string> last-event: "Ready — click an OS event or use keyboard";
+
+    // Simulated OS event callbacks
+    callback bt-connect();
+    callback bt-disconnect();
+    callback bt-pair();
+    callback bt-unpair();
+    callback bt-pair-timeout();
+
+    callback sim-vol-up();
+    callback sim-vol-down();
+
+    callback slider-open-ev();
+    callback slider-closed-ev();
+
+    callback power-pressed();
+    callback power-long-pressed();
+
+    callback incoming-call();
+    callback remote-end-call();
+
+    forward-focus: phone-view;
+
+    HorizontalLayout {
+        padding: 14px;
+        spacing: 14px;
+
+        // Left pane: real production 240x320 UI inside a subtle phone bezel
+        VerticalLayout {
+            alignment: center;
+            spacing: 10px;
+
+            Text {
+                text: "NOKIA 8110 4G  (240×320)";
+                color: SimTheme.text-muted;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.9px;
+                horizontal-alignment: center;
+            }
+
+            Rectangle {
+                width: 256px;
+                height: 336px;
+                border-radius: 14px;
+                background: #000000;
+                border-width: 2px;
+                border-color: SimTheme.border;
+
+                phone-view := MainView {
+                    x: 8px;
+                    y: 8px;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 3px;
+                Text {
+                    text: "←/→ Softkeys · ↵ PickUp · ⌫/Esc HangUp";
+                    color: SimTheme.text-muted;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: "↑/↓ Call Volume";
+                    color: SimTheme.text-muted;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Vertical divider
+        Rectangle {
+            width: 1px;
+            background: SimTheme.border;
+        }
+
+        // Right pane: OS Event Simulator controls
+        VerticalLayout {
+            width: 320px;
+            spacing: 8px;
+
+            // Live status header
+            Rectangle {
+                height: 30px;
+                border-radius: 6px;
+                background: SimTheme.surface;
+                border-width: 1px;
+                border-color: SimTheme.border;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "SCREEN: " + root.active-screen-name;
+                        color: SimTheme.accent;
+                        font-size: 11px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: root.paired-device-name != "" ? root.paired-device-name : "Unpaired";
+                        color: root.bt-connected ? SimTheme.success : SimTheme.text-muted;
+                        font-size: 11px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            // Bluetooth OS events
+            SectionCard {
+                title: "BLUETOOTH";
+                badge-text: root.bt-connected ? "CONNECTED" : "DISCONNECTED";
+                badge-color: root.bt-connected ? SimTheme.success : SimTheme.warning;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    SimButton {
+                        label: "Connect";
+                        accent-color: SimTheme.success;
+                        active: root.bt-connected;
+                        clicked => { root.bt-connect(); }
+                    }
+                    SimButton {
+                        label: "Disconnect";
+                        accent-color: SimTheme.warning;
+                        active: !root.bt-connected;
+                        clicked => { root.bt-disconnect(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    SimButton {
+                        label: "Pair";
+                        accent-color: SimTheme.accent;
+                        clicked => { root.bt-pair(); }
+                    }
+                    SimButton {
+                        label: "Unpair";
+                        accent-color: SimTheme.danger;
+                        clicked => { root.bt-unpair(); }
+                    }
+                }
+
+                SimButton {
+                    label: "Pairing Timeout";
+                    accent-color: SimTheme.warning;
+                    enabled: root.active-screen == ScreenId.pairing;
+                    clicked => { root.bt-pair-timeout(); }
+                }
+            }
+
+            // Volume OS events
+            SectionCard {
+                title: "VOLUME";
+                badge-text: Math.clamp(root.volume-percent, 0, 100) + "%";
+                badge-color: SimTheme.accent;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    SimButton {
+                        label: "Volume -";
+                        accent-color: SimTheme.accent;
+                        clicked => { root.sim-vol-down(); }
+                    }
+                    SimButton {
+                        label: "Volume +";
+                        accent-color: SimTheme.accent;
+                        clicked => { root.sim-vol-up(); }
+                    }
+                }
+            }
+
+            // Hardware Slider switch events
+            SectionCard {
+                title: "SLIDER (SW_KEYPAD_SLIDE)";
+                badge-text: root.slider-open ? "OPEN" : "CLOSED";
+                badge-color: root.slider-open ? SimTheme.accent : SimTheme.text-muted;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    SimButton {
+                        label: "Slider Open";
+                        accent-color: SimTheme.accent;
+                        active: root.slider-open;
+                        clicked => { root.slider-open-ev(); }
+                    }
+                    SimButton {
+                        label: "Slider Closed";
+                        accent-color: SimTheme.warning;
+                        active: !root.slider-open;
+                        clicked => { root.slider-closed-ev(); }
+                    }
+                }
+            }
+
+            // PMIC Power key events
+            SectionCard {
+                title: "POWER KEY (KEY_POWER)";
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    SimButton {
+                        label: "Power Pressed";
+                        accent-color: SimTheme.warning;
+                        clicked => { root.power-pressed(); }
+                    }
+                    SimButton {
+                        label: "Power Long Press";
+                        accent-color: SimTheme.danger;
+                        clicked => { root.power-long-pressed(); }
+                    }
+                }
+            }
+
+            // Telephony / HFP D-Bus events
+            SectionCard {
+                title: "TELEPHONY (HFP)";
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    SimButton {
+                        label: "Incoming Call";
+                        accent-color: SimTheme.success;
+                        clicked => { root.incoming-call(); }
+                    }
+                    SimButton {
+                        label: "Remote End";
+                        accent-color: SimTheme.danger;
+                        clicked => { root.remote-end-call(); }
+                    }
+                }
+            }
+
+            // Last event log footer
+            Rectangle {
+                height: 26px;
+                border-radius: 6px;
+                background: SimTheme.surface-pressed;
+                border-width: 1px;
+                border-color: SimTheme.border;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    Text {
+                        text: root.last-event;
+                        color: SimTheme.text-muted;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+}

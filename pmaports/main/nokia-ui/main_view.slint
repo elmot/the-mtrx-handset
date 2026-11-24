@@ -1,0 +1,136 @@
+import { HomeScreen } from "screen_home.slint";
+import { IncomingCallScreen } from "screen_incoming_call.slint";
+import { ActiveCallScreen } from "screen_active_call.slint";
+import { CallEndedScreen } from "screen_call_ended.slint";
+import { UnpairConfirmScreen } from "screen_unpair.slint";
+import { PairingDiscoveryScreen } from "screen_pairing.slint";
+import { PowerOffScreen } from "screen_power_off.slint";
+
+export enum ScreenId {
+    home,
+    sleep,
+    incoming-call,
+    active-call,
+    call-ended,
+    unpair,
+    pairing,
+    power-off,
+}
+
+export component MainView inherits Rectangle {
+    width: 240px;
+    height: 320px;
+    background: #000000;
+
+    // Active state
+    in-out property <ScreenId> active-screen: ScreenId.home;
+
+    // Shared device / telephony state
+    in-out property <bool> bt-connected: false;
+    in-out property <string> paired-device-name: "";
+    in-out property <string> local-bt-name: "BananaPhone";
+    in-out property <bool> slider-open: true;
+    in-out property <int> battery-percent: 85;
+
+    // Call state
+    in-out property <string> caller-id: "";
+    in-out property <bool> ring-silenced: false;
+    in-out property <bool> speaker-mode: false;
+    in-out property <int> volume-percent: 65;
+
+    // Pairing state
+    in-out property <bool> pairing-timed-out: false;
+
+    // Hardware / softkey callbacks for Python state machine
+    callback soft-left();
+    callback soft-right();
+    callback pickup-pressed();
+    callback hangup-pressed();
+    callback vol-up();
+    callback vol-down();
+
+    forward-focus: fs;
+    fs := FocusScope {
+        key-pressed(ev) => {
+            if (ev.text == Key.LeftArrow) {
+                root.soft-left();
+                return accept;
+            }
+            if (ev.text == Key.RightArrow) {
+                root.soft-right();
+                return accept;
+            }
+            if (ev.text == Key.UpArrow) {
+                root.vol-up();
+                return accept;
+            }
+            if (ev.text == Key.DownArrow) {
+                root.vol-down();
+                return accept;
+            }
+            if (ev.text == Key.Return) {
+                root.pickup-pressed();
+                return accept;
+            }
+            if (ev.text == Key.Escape || ev.text == Key.Backspace) {
+                root.hangup-pressed();
+                return accept;
+            }
+            return reject;
+        }
+
+        if root.active-screen == ScreenId.home: HomeScreen {
+            bt-connected: root.bt-connected;
+            paired-device-name: root.paired-device-name;
+            slider-open: root.slider-open;
+            battery-percent: root.battery-percent;
+            pair-clicked => { root.soft-left(); }
+            off-clicked => { root.soft-right(); }
+        }
+
+        if root.active-screen == ScreenId.incoming-call: IncomingCallScreen {
+            caller-id: root.caller-id;
+            ring-silenced: root.ring-silenced;
+            battery-percent: root.battery-percent;
+            answer-clicked => { root.soft-left(); }
+            reject-clicked => { root.soft-right(); }
+        }
+
+        if root.active-screen == ScreenId.active-call: ActiveCallScreen {
+            caller-id: root.caller-id;
+            speaker-mode: root.speaker-mode;
+            volume-percent: root.volume-percent;
+            slider-open: root.slider-open;
+            battery-percent: root.battery-percent;
+            toggle-sink-clicked => { root.soft-left(); }
+            end-call-clicked => { root.soft-right(); }
+        }
+
+        if root.active-screen == ScreenId.call-ended: CallEndedScreen {
+            battery-percent: root.battery-percent;
+        }
+
+        if root.active-screen == ScreenId.unpair: UnpairConfirmScreen {
+            paired-device-name: root.paired-device-name;
+            battery-percent: root.battery-percent;
+            cancel-clicked => { root.soft-left(); }
+            unpair-clicked => { root.soft-right(); }
+        }
+
+        if root.active-screen == ScreenId.pairing: PairingDiscoveryScreen {
+            device-name: root.local-bt-name;
+            timed-out: root.pairing-timed-out;
+            battery-percent: root.battery-percent;
+            retry-pair-clicked => { root.soft-left(); }
+            back-clicked => { root.soft-right(); }
+        }
+
+        if root.active-screen == ScreenId.power-off: PowerOffScreen {
+            battery-percent: root.battery-percent;
+            yes-clicked => { root.soft-left(); }
+            no-clicked => { root.soft-right(); }
+        }
+
+        // ScreenId.sleep renders solid #000000 from background
+    }
+}
