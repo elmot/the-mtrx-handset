@@ -4,7 +4,8 @@ name="nokia-bt-hfp"
 description="Nokia 8110 4G Bluetooth HFP-HF + Q6AFE INT_BT_SCO Audio Bridge"
 command="/usr/bin/nokia-bt-hfp"
 command_args="--earpiece --mic dual"
-command_user="elmot:elmot"
+_hfp_user="$(awk -F: '$3 == 10000 { print $1; exit }' /etc/passwd)"
+command_user="${_hfp_user:-root}"
 command_background=true
 pidfile="/run/nokia-bt-hfp.pid"
 

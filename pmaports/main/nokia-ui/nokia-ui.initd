@@ -9,7 +9,7 @@ pidfile="/run/nokia-ui.pid"
 
 depend() {
 	need dbus
-	after localmount
+	after localmount nokia-bt-hfp
 }
 
 start_pre() {

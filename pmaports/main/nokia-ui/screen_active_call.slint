@@ -4,6 +4,7 @@ import { Theme, StatusBar, SoftkeyBar } from "ui_common.slint";
 export component ActiveCallScreen inherits Rectangle {
     in property <string> caller-id: "Unknown";
     in property <bool> speaker-mode: false;
+    in property <string> audio-sink-label: "";
     in property <int> volume-percent: 65;
     in property <bool> slider-open: true;
     in property <int> battery-percent: 85;
@@ -63,7 +64,7 @@ export component ActiveCallScreen inherits Rectangle {
                     Text {
                         width: 100%;
                         height: 100%;
-                        text: root.speaker-mode ? "SINK: SPEAKER" : "SINK: EARPIECE";
+                        text: "SINK: " + (root.audio-sink-label != "" ? root.audio-sink-label : (root.speaker-mode ? "SPEAKER" : "EARPIECE"));
                         color: root.speaker-mode ? Theme.warning : Theme.accent;
                         font-size: 12px;
                         font-weight: 700;

@@ -34,6 +34,7 @@ struct bt_sockaddr_sco {
 
 #define HFP_HF_UUID "0000111e-0000-1000-8000-00805f9b34fb"
 #define PROFILE_OBJ_PATH "/org/nokia/BtHfpProfile"
+#define LOCAL_BT_ALIAS "THE MTRX HANDSET"
 #define AT_QUEUE_SIZE 24
 
 #define LOG(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
@@ -91,6 +92,8 @@ struct hfp_app {
 	GDBusConnection *sys_bus;
 	guint reg_id;
 	guint bluez_watch_id;
+	guint bluez_prop_sub_id;
+	guint bluez_rem_sub_id;
 	guint adapter_timer_id;
 	int adapter_retries;
 
@@ -128,12 +131,20 @@ struct hfp_app {
 	int val_callheld;
 	char caller_id[64];
 
+	char local_bt_name[64];
+	bool bonded;
+	char bonded_name[128];
+	char bonded_addr[32];
+	char bonded_path[256];
+	bool pairing_active;
+
 	int jack_fd;
 	guint jack_watch_id;
 	enum hfp_output_mode saved_output_mode;
 
 	int slide_fd;
 	guint slide_watch_id;
+	bool slider_open;
 };
 
 static void pump_at_queue(struct hfp_app *app);
@@ -170,6 +181,56 @@ static void emit_hfp_state(struct hfp_app *app)
 		"org.nokia.BtHfp", "CallState",
 		g_variant_new("(bss)", app->rfcomm_fd >= 0, state,
 			      app->caller_id),
+		NULL);
+}
+
+static void emit_audio_state(struct hfp_app *app)
+{
+	struct alsa_bridge_cfg cfg;
+
+	if (!app->sys_bus || !app->bridge)
+		return;
+	alsa_bridge_get_cfg(app->bridge, &cfg);
+	g_dbus_connection_emit_signal(
+		app->sys_bus, NULL, PROFILE_OBJ_PATH,
+		"org.nokia.BtHfp", "AudioState",
+		g_variant_new("(siib)", output_names[cfg.output_mode],
+			      cfg.vgs_level, cfg.vgm_level, cfg.muted),
+		NULL);
+}
+
+static void emit_slider_state(struct hfp_app *app)
+{
+	if (!app->sys_bus)
+		return;
+	g_dbus_connection_emit_signal(
+		app->sys_bus, NULL, PROFILE_OBJ_PATH,
+		"org.nokia.BtHfp", "SliderState",
+		g_variant_new("(b)", app->slider_open),
+		NULL);
+}
+
+static void emit_bond_state(struct hfp_app *app)
+{
+	if (!app->sys_bus)
+		return;
+	g_dbus_connection_emit_signal(
+		app->sys_bus, NULL, PROFILE_OBJ_PATH,
+		"org.nokia.BtHfp", "BondState",
+		g_variant_new("(bssb)", app->bonded, app->bonded_name,
+			      app->bonded_addr, app->pairing_active),
+		NULL);
+}
+
+static void emit_pairing_success(struct hfp_app *app, const char *name,
+				 const char *addr)
+{
+	if (!app->sys_bus)
+		return;
+	g_dbus_connection_emit_signal(
+		app->sys_bus, NULL, PROFILE_OBJ_PATH,
+		"org.nokia.BtHfp", "PairingSuccess",
+		g_variant_new("(ss)", name ? name : "", addr ? addr : ""),
 		NULL);
 }
 
@@ -355,13 +416,17 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 				n = sizeof(app->caller_id) - 1;
 			memcpy(app->caller_id, q1 + 1, n);
 			app->caller_id[n] = '\0';
+			emit_hfp_state(app);
 		}
 	} else if (strncmp(line, "+VGS:", 5) == 0) {
 		alsa_bridge_set_vgs(app->bridge, atoi(line + 5));
+		emit_audio_state(app);
 	} else if (strncmp(line, "+VGM:", 5) == 0) {
 		alsa_bridge_set_vgm(app->bridge, atoi(line + 5));
+		emit_audio_state(app);
 	} else if (strcmp(line, "RING") == 0) {
-		/* callsetup state is driven by +CIEV only, so "incoming" fires reliably */
+		if (app->val_call == 0 && app->val_callsetup == 0)
+			app->val_callsetup = 1;
 		run_call_hook(app, "ring");
 	} else if (strcmp(line, "OK") == 0 || strcmp(line, "ERROR") == 0 ||
 		   strncmp(line, "+CME ERROR:", 11) == 0) {
@@ -393,6 +458,7 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 			} else if (strncmp(app->at_current, "AT+CMER=", 8) == 0 && ok) {
 				app->slc_ready = true;
 				LOG("[hfp] SLC established");
+				emit_hfp_state(app);
 			}
 			app->at_inflight = false;
 			pump_at_queue(app);
@@ -693,6 +759,45 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 				NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
 			if (r)
 				g_variant_unref(r);
+			if (!app->bonded || strcmp(app->bonded_path, app->device_path) != 0) {
+				char dev_name[128];
+				char dev_addr[32];
+
+				app->bonded = true;
+				snprintf(app->bonded_path, sizeof(app->bonded_path),
+					 "%s", app->device_path);
+				snprintf(dev_name, sizeof(dev_name), "%s", app->peer_addr);
+				snprintf(dev_addr, sizeof(dev_addr), "%s", app->peer_addr);
+				{
+					GVariant *res = g_dbus_connection_call_sync(
+						app->sys_bus, "org.bluez", app->device_path,
+						"org.freedesktop.DBus.Properties", "GetAll",
+						g_variant_new("(s)", "org.bluez.Device1"),
+						G_VARIANT_TYPE("(a{sv})"),
+						G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+					if (res) {
+						GVariant *dprops = NULL;
+						g_variant_get(res, "(@a{sv})", &dprops);
+						if (dprops) {
+							GVariant *v = g_variant_lookup_value(
+								dprops, "Alias", G_VARIANT_TYPE_STRING);
+							if (!v)
+								v = g_variant_lookup_value(
+									dprops, "Name", G_VARIANT_TYPE_STRING);
+							if (v) {
+								snprintf(dev_name, sizeof(dev_name), "%s",
+									 g_variant_get_string(v, NULL));
+								g_variant_unref(v);
+							}
+							g_variant_unref(dprops);
+						}
+						g_variant_unref(res);
+					}
+				}
+				snprintf(app->bonded_name, sizeof(app->bonded_name), "%s", dev_name);
+				snprintf(app->bonded_addr, sizeof(app->bonded_addr), "%s", dev_addr);
+				emit_bond_state(app);
+			}
 		}
 
 		LOG("[bluez] NewConnection dev=%s peer=%s fd=%d",
@@ -701,6 +806,7 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 
 		/* Initiate HFP 1.7 SLC: bits 0|1|2|4|5|7 = 183 */
 		emit_hfp_state(app);
+		emit_audio_state(app);
 		queue_at(app, "AT+BRSF=183");
 	}
 }
@@ -775,17 +881,334 @@ static void configure_bluez_agent(struct hfp_app *app)
 	}
 }
 
+static bool dict_lookup_str(GVariant *dict, const char *key, char *out, size_t sz)
+{
+	GVariant *v = g_variant_lookup_value(dict, key, G_VARIANT_TYPE_STRING);
+
+	if (!v)
+		return false;
+	snprintf(out, sz, "%s", g_variant_get_string(v, NULL));
+	g_variant_unref(v);
+	return out[0] != '\0';
+}
+
+static bool dict_lookup_bool(GVariant *dict, const char *key, bool *out)
+{
+	GVariant *v = g_variant_lookup_value(dict, key, G_VARIANT_TYPE_BOOLEAN);
+
+	if (!v)
+		return false;
+	*out = g_variant_get_boolean(v);
+	g_variant_unref(v);
+	return true;
+}
+
+static void trust_device(struct hfp_app *app, const char *dev_path)
+{
+	GVariant *r;
+
+	if (!app->sys_bus || !dev_path || !dev_path[0])
+		return;
+	r = g_dbus_connection_call_sync(
+		app->sys_bus, "org.bluez", dev_path,
+		"org.freedesktop.DBus.Properties", "Set",
+		g_variant_new("(ssv)", "org.bluez.Device1",
+			      "Trusted", g_variant_new_boolean(TRUE)),
+		NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
+	if (r)
+		g_variant_unref(r);
+}
+
+static void fetch_device_info(struct hfp_app *app, const char *dev_path,
+			      char *name_out, size_t name_sz,
+			      char *addr_out, size_t addr_sz)
+{
+	GVariant *res, *props = NULL;
+
+	name_out[0] = '\0';
+	extract_mac_from_dev_path(dev_path, addr_out, addr_sz);
+
+	if (!app->sys_bus || !dev_path || !dev_path[0])
+		return;
+	res = g_dbus_connection_call_sync(
+		app->sys_bus, "org.bluez", dev_path,
+		"org.freedesktop.DBus.Properties", "GetAll",
+		g_variant_new("(s)", "org.bluez.Device1"),
+		G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NONE, 2000,
+		NULL, NULL);
+	if (!res)
+		return;
+	g_variant_get(res, "(@a{sv})", &props);
+	if (props) {
+		dict_lookup_str(props, "Address", addr_out, addr_sz);
+		if (!dict_lookup_str(props, "Alias", name_out, name_sz))
+			dict_lookup_str(props, "Name", name_out, name_sz);
+		g_variant_unref(props);
+	}
+	g_variant_unref(res);
+	if (!name_out[0])
+		snprintf(name_out, name_sz, "%s", addr_out);
+}
+
+static void set_pairing_mode(struct hfp_app *app, bool enable)
+{
+	if (!app->sys_bus)
+		return;
+	if (enable) {
+		set_adapter_prop(app, "PairableTimeout", g_variant_new_uint32(120));
+		set_adapter_prop(app, "DiscoverableTimeout", g_variant_new_uint32(120));
+		set_adapter_prop(app, "Pairable", g_variant_new_boolean(TRUE));
+		set_adapter_prop(app, "Discoverable", g_variant_new_boolean(TRUE));
+		app->pairing_active = true;
+		LOG("[bluez] Pairing discovery enabled (120s timeout)");
+	} else {
+		set_adapter_prop(app, "Discoverable", g_variant_new_boolean(FALSE));
+		set_adapter_prop(app, "Pairable", g_variant_new_boolean(FALSE));
+		app->pairing_active = false;
+		LOG("[bluez] Pairing discovery disabled");
+	}
+	emit_bond_state(app);
+}
+
+static void scan_bluez_devices(struct hfp_app *app)
+{
+	GError *err = NULL;
+	GVariant *res;
+	GVariantIter *obj_iter = NULL;
+	const gchar *obj_path = NULL;
+	GVariant *ifaces = NULL;
+	bool found_bonded = false;
+	char found_name[128] = { 0 };
+	char found_addr[32] = { 0 };
+	char found_path[256] = { 0 };
+
+	if (!app->sys_bus)
+		return;
+	res = g_dbus_connection_call_sync(
+		app->sys_bus, "org.bluez", "/",
+		"org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+		NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+		G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
+	if (!res) {
+		g_clear_error(&err);
+		return;
+	}
+
+	g_variant_get(res, "(a{oa{sa{sv}}})", &obj_iter);
+	while (g_variant_iter_loop(obj_iter, "{&o@a{sa{sv}}}", &obj_path, &ifaces)) {
+		if (strcmp(obj_path, "/org/bluez/hci0") == 0) {
+			GVariant *aprops = g_variant_lookup_value(
+				ifaces, "org.bluez.Adapter1", G_VARIANT_TYPE("a{sv}"));
+			if (aprops) {
+				bool disc = false;
+				dict_lookup_str(aprops, "Alias", app->local_bt_name,
+						sizeof(app->local_bt_name));
+				if (dict_lookup_bool(aprops, "Discoverable", &disc))
+					app->pairing_active = disc;
+				g_variant_unref(aprops);
+			}
+		} else if (strstr(obj_path, "/org/bluez/hci0/dev_") != NULL) {
+			GVariant *dprops = g_variant_lookup_value(
+				ifaces, "org.bluez.Device1", G_VARIANT_TYPE("a{sv}"));
+			if (dprops) {
+				bool paired = false, trusted = false;
+				dict_lookup_bool(dprops, "Paired", &paired);
+				dict_lookup_bool(dprops, "Trusted", &trusted);
+				if (paired && !trusted)
+					trust_device(app, obj_path);
+				if (paired && (!found_bonded ||
+					       (app->device_path[0] &&
+						strcmp(obj_path, app->device_path) == 0))) {
+					found_bonded = true;
+					snprintf(found_path, sizeof(found_path), "%s", obj_path);
+					extract_mac_from_dev_path(obj_path, found_addr,
+								  sizeof(found_addr));
+					dict_lookup_str(dprops, "Address", found_addr,
+							sizeof(found_addr));
+					found_name[0] = '\0';
+					if (!dict_lookup_str(dprops, "Alias", found_name,
+							     sizeof(found_name)))
+						dict_lookup_str(dprops, "Name", found_name,
+								sizeof(found_name));
+					if (!found_name[0])
+						snprintf(found_name, sizeof(found_name),
+							 "%s", found_addr);
+				}
+				g_variant_unref(dprops);
+			}
+		}
+	}
+	g_variant_iter_free(obj_iter);
+	g_variant_unref(res);
+
+	app->bonded = found_bonded;
+	snprintf(app->bonded_path, sizeof(app->bonded_path), "%s", found_path);
+	snprintf(app->bonded_name, sizeof(app->bonded_name), "%s", found_name);
+	snprintf(app->bonded_addr, sizeof(app->bonded_addr), "%s", found_addr);
+	emit_bond_state(app);
+}
+
+static void unpair_all_devices(struct hfp_app *app)
+{
+	GError *err = NULL;
+	GVariant *res;
+	GVariantIter *obj_iter = NULL;
+	const gchar *obj_path = NULL;
+	GVariant *ifaces = NULL;
+	char paths[16][256];
+	size_t npaths = 0;
+
+	close_rfcomm(app);
+
+	if (app->sys_bus) {
+		res = g_dbus_connection_call_sync(
+			app->sys_bus, "org.bluez", "/",
+			"org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
+			NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
+			G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
+		if (res) {
+			g_variant_get(res, "(a{oa{sa{sv}}})", &obj_iter);
+			while (g_variant_iter_loop(obj_iter, "{&o@a{sa{sv}}}",
+						   &obj_path, &ifaces)) {
+				if (strstr(obj_path, "/org/bluez/hci0/dev_") != NULL &&
+				    npaths < G_N_ELEMENTS(paths)) {
+					snprintf(paths[npaths], sizeof(paths[npaths]),
+						 "%s", obj_path);
+					npaths++;
+				}
+			}
+			g_variant_iter_free(obj_iter);
+			g_variant_unref(res);
+		} else {
+			g_clear_error(&err);
+		}
+
+		for (size_t i = 0; i < npaths; i++) {
+			GVariant *r = g_dbus_connection_call_sync(
+				app->sys_bus, "org.bluez", "/org/bluez/hci0",
+				"org.bluez.Adapter1", "RemoveDevice",
+				g_variant_new("(o)", paths[i]),
+				NULL, G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
+			if (r) {
+				LOG("[bluez] Removed device %s", paths[i]);
+				g_variant_unref(r);
+			} else {
+				LOG("[bluez] RemoveDevice(%s) failed: %s", paths[i],
+				    err ? err->message : "unknown");
+				g_clear_error(&err);
+			}
+		}
+	}
+
+	app->bonded = false;
+	app->bonded_path[0] = '\0';
+	app->bonded_name[0] = '\0';
+	app->bonded_addr[0] = '\0';
+	emit_bond_state(app);
+}
+
+static void on_bluez_properties_changed(GDBusConnection *conn, const gchar *sender,
+					const gchar *obj_path, const gchar *iface_name,
+					const gchar *sig_name, GVariant *parameters,
+					gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	const gchar *changed_iface = NULL;
+	GVariant *changed = NULL;
+
+	(void)conn;
+	(void)sender;
+	(void)iface_name;
+	(void)sig_name;
+
+	g_variant_get(parameters, "(&s@a{sv}@as)", &changed_iface, &changed, NULL);
+	if (!changed)
+		return;
+
+	if (strcmp(changed_iface, "org.bluez.Adapter1") == 0 &&
+	    strcmp(obj_path, "/org/bluez/hci0") == 0) {
+		bool disc = false;
+		bool notify = false;
+
+		if (dict_lookup_bool(changed, "Discoverable", &disc)) {
+			app->pairing_active = disc;
+			notify = true;
+		}
+		if (dict_lookup_str(changed, "Alias", app->local_bt_name,
+				    sizeof(app->local_bt_name)))
+			notify = true;
+		if (notify)
+			emit_bond_state(app);
+	} else if (strcmp(changed_iface, "org.bluez.Device1") == 0 &&
+		   strstr(obj_path, "/org/bluez/hci0/dev_") != NULL) {
+		bool paired = false;
+
+		if (dict_lookup_bool(changed, "Paired", &paired)) {
+			if (paired) {
+				char dev_name[128];
+				char dev_addr[32];
+
+				trust_device(app, obj_path);
+				fetch_device_info(app, obj_path, dev_name,
+						  sizeof(dev_name), dev_addr,
+						  sizeof(dev_addr));
+				app->bonded = true;
+				snprintf(app->bonded_path, sizeof(app->bonded_path),
+					 "%s", obj_path);
+				snprintf(app->bonded_name, sizeof(app->bonded_name),
+					 "%s", dev_name);
+				snprintf(app->bonded_addr, sizeof(app->bonded_addr),
+					 "%s", dev_addr);
+				LOG("[bluez] Pairing succeeded: %s (%s)",
+				    app->bonded_name, app->bonded_addr);
+				set_pairing_mode(app, false);
+				emit_pairing_success(app, app->bonded_name,
+						     app->bonded_addr);
+			} else {
+				scan_bluez_devices(app);
+			}
+		} else if (app->bonded && strcmp(obj_path, app->bonded_path) == 0) {
+			if (dict_lookup_str(changed, "Alias", app->bonded_name,
+					    sizeof(app->bonded_name)) ||
+			    dict_lookup_str(changed, "Name", app->bonded_name,
+					    sizeof(app->bonded_name)))
+				emit_bond_state(app);
+		}
+	}
+
+	g_variant_unref(changed);
+}
+
+static void on_bluez_interfaces_removed(GDBusConnection *conn, const gchar *sender,
+					const gchar *obj_path, const gchar *iface_name,
+					const gchar *sig_name, GVariant *parameters,
+					gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	const gchar *removed_path = NULL;
+
+	(void)conn;
+	(void)sender;
+	(void)obj_path;
+	(void)iface_name;
+	(void)sig_name;
+
+	g_variant_get(parameters, "(&o@as)", &removed_path, NULL);
+	if (removed_path && strstr(removed_path, "/org/bluez/hci0/dev_") != NULL)
+		scan_bluez_devices(app);
+}
+
 static bool configure_bluez_adapter(struct hfp_app *app)
 {
 	const struct {
 		const char *prop;
 		GVariant *val;
 	} props[] = {
-		{ "Alias", g_variant_new_string("nokia-argon") },
-		{ "PairableTimeout", g_variant_new_uint32(0) },
-		{ "Pairable", g_variant_new_boolean(TRUE) },
-		{ "DiscoverableTimeout", g_variant_new_uint32(0) },
-		{ "Discoverable", g_variant_new_boolean(TRUE) },
+		{ "Alias", g_variant_new_string(LOCAL_BT_ALIAS) },
+		{ "PairableTimeout", g_variant_new_uint32(120) },
+		{ "DiscoverableTimeout", g_variant_new_uint32(120) },
+		{ "Pairable", g_variant_new_boolean(FALSE) },
+		{ "Discoverable", g_variant_new_boolean(FALSE) },
 	};
 
 	if (!set_adapter_prop(app, "Powered", g_variant_new_boolean(TRUE))) {
@@ -795,7 +1218,11 @@ static bool configure_bluez_adapter(struct hfp_app *app)
 	}
 	for (size_t i = 0; i < G_N_ELEMENTS(props); i++)
 		set_adapter_prop(app, props[i].prop, props[i].val);
-	LOG("[bluez] Configured hci0 (Alias=nokia-argon, Powered=1, Discoverable=1, Pairable=1)");
+	snprintf(app->local_bt_name, sizeof(app->local_bt_name), "%s", LOCAL_BT_ALIAS);
+	app->pairing_active = false;
+	LOG("[bluez] Configured hci0 (Alias=%s, Powered=1, Discoverable=0, Pairable=0)",
+	    LOCAL_BT_ALIAS);
+	scan_bluez_devices(app);
 	return true;
 }
 
@@ -810,39 +1237,6 @@ static gboolean on_adapter_retry(gpointer user_data)
 	return G_SOURCE_CONTINUE;
 }
 
-static void trust_all_known_devices(struct hfp_app *app)
-{
-	GError *err = NULL;
-	GVariant *res = g_dbus_connection_call_sync(
-		app->sys_bus, "org.bluez", "/",
-		"org.freedesktop.DBus.ObjectManager", "GetManagedObjects",
-		NULL, G_VARIANT_TYPE("(a{oa{sa{sv}}})"),
-		G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &err);
-	if (!res) {
-		g_clear_error(&err);
-		return;
-	}
-
-	GVariantIter *obj_iter = NULL;
-	const gchar *obj_path = NULL;
-	GVariant *ifaces = NULL;
-	g_variant_get(res, "(a{oa{sa{sv}}})", &obj_iter);
-	while (g_variant_iter_loop(obj_iter, "{&o@a{sa{sv}}}", &obj_path, &ifaces)) {
-		if (strstr(obj_path, "/org/bluez/hci0/dev_") != NULL) {
-			GVariant *r = g_dbus_connection_call_sync(
-				app->sys_bus, "org.bluez", obj_path,
-				"org.freedesktop.DBus.Properties", "Set",
-				g_variant_new("(ssv)", "org.bluez.Device1",
-					      "Trusted", g_variant_new_boolean(TRUE)),
-				NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL, NULL);
-			if (r)
-				g_variant_unref(r);
-		}
-	}
-	g_variant_iter_free(obj_iter);
-	g_variant_unref(res);
-}
-
 static void on_bluez_appeared(GDBusConnection *conn, const gchar *name,
 			      const gchar *owner, gpointer user_data)
 {
@@ -852,7 +1246,6 @@ static void on_bluez_appeared(GDBusConnection *conn, const gchar *name,
 	(void)owner;
 	register_bluez_profile(app);
 	configure_bluez_agent(app);
-	trust_all_known_devices(app);
 	if (!configure_bluez_adapter(app) && app->adapter_timer_id == 0) {
 		app->adapter_retries = 0;
 		app->adapter_timer_id =
@@ -870,7 +1263,9 @@ static void on_bluez_vanished(GDBusConnection *conn, const gchar *name,
 		g_source_remove(app->adapter_timer_id);
 		app->adapter_timer_id = 0;
 	}
+	app->pairing_active = false;
 	close_rfcomm(app);
+	emit_bond_state(app);
 }
 
 static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply,
@@ -902,7 +1297,7 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 		struct alsa_bridge_cfg cfg;
 		alsa_bridge_get_cfg(app->bridge, &cfg);
 		snprintf(reply, reply_sz,
-			 "connected=%d slc=%d sco=%d bridge=%d peer=%s call=%d callsetup=%d caller=%s output=%s mic=%s vgs=%d vgm=%d mute=%d aec=%d ns=%d\n",
+			 "connected=%d slc=%d sco=%d bridge=%d peer=%s call=%d callsetup=%d caller=%s output=%s mic=%s vgs=%d vgm=%d mute=%d aec=%d ns=%d slider=%d bonded=%d\n",
 			 app->rfcomm_fd >= 0, app->slc_ready,
 			 app->sco_fd >= 0, alsa_bridge_is_running(app->bridge),
 			 app->peer_addr[0] ? app->peer_addr : "-",
@@ -911,7 +1306,38 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 			 output_names[cfg.output_mode],
 			 mic_names[cfg.mic_source], cfg.vgs_level,
 			 cfg.vgm_level, cfg.muted, cfg.enable_aec,
-			 cfg.enable_ns);
+			 cfg.enable_ns, app->slider_open ? 1 : 0,
+			 app->bonded ? 1 : 0);
+		return;
+	}
+
+	if (strcmp(cmd, "bt-info") == 0) {
+		snprintf(reply, reply_sz,
+			 "bonded=%d\ndevice_name=%s\ndevice_addr=%s\nlocal_name=%s\npairing=%d\nslider=%d\n",
+			 app->bonded ? 1 : 0,
+			 app->bonded_name,
+			 app->bonded_addr,
+			 app->local_bt_name[0] ? app->local_bt_name : LOCAL_BT_ALIAS,
+			 app->pairing_active ? 1 : 0,
+			 app->slider_open ? 1 : 0);
+		return;
+	}
+
+	if (strcmp(cmd, "pair-start") == 0) {
+		set_pairing_mode(app, true);
+		snprintf(reply, reply_sz, "OK pairing\n");
+		return;
+	}
+
+	if (strcmp(cmd, "pair-stop") == 0) {
+		set_pairing_mode(app, false);
+		snprintf(reply, reply_sz, "OK stopped\n");
+		return;
+	}
+
+	if (strcmp(cmd, "unpair") == 0) {
+		unpair_all_devices(app);
+		snprintf(reply, reply_sz, "OK unpaired\n");
 		return;
 	}
 
@@ -932,6 +1358,7 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 		if (mode != OUTPUT_HEADPHONES)
 			app->saved_output_mode = mode;
 		alsa_bridge_set_output_mode(app->bridge, mode);
+		emit_audio_state(app);
 		snprintf(reply, reply_sz, "OK %s\n", output_names[idx]);
 	} else if (strcmp(cmd, "dial") == 0 && arg && arg[0]) {
 		if (app->rfcomm_fd < 0)
@@ -953,6 +1380,7 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 	} else if (strcmp(cmd, "mute") == 0 || strcmp(cmd, "unmute") == 0) {
 		bool m = (cmd[0] == 'm');
 		alsa_bridge_set_mute(app->bridge, m);
+		emit_audio_state(app);
 		snprintf(reply, reply_sz, "OK %s\n", m ? "muted" : "unmuted");
 	} else if ((strcmp(cmd, "vgs") == 0 || strcmp(cmd, "vgm") == 0) && arg) {
 		bool is_vgs = (cmd[2] == 's');
@@ -961,6 +1389,7 @@ static void handle_ctl_cmd(struct hfp_app *app, const char *cmdline, char *reply
 			alsa_bridge_set_vgs(app->bridge, v);
 		else
 			alsa_bridge_set_vgm(app->bridge, v);
+		emit_audio_state(app);
 		if (app->rfcomm_fd >= 0) {
 			char at[32];
 			snprintf(at, sizeof(at), "AT+VG%c=%d", is_vgs ? 'S' : 'M', v);
@@ -1046,9 +1475,11 @@ static void apply_jack_state(struct hfp_app *app, bool inserted)
 		if (cfg.output_mode != OUTPUT_HEADPHONES)
 			app->saved_output_mode = cfg.output_mode;
 		alsa_bridge_set_output_mode(app->bridge, OUTPUT_HEADPHONES);
+		emit_audio_state(app);
 		LOG("[jack] wired headset plugged in -> output=headphones");
 	} else if (cfg.output_mode == OUTPUT_HEADPHONES) {
 		alsa_bridge_set_output_mode(app->bridge, app->saved_output_mode);
+		emit_audio_state(app);
 		LOG("[jack] wired headset unplugged -> output=%s",
 		    output_names[app->saved_output_mode]);
 	}
@@ -1117,13 +1548,15 @@ static void set_kbd_backlight(bool on)
 
 static void apply_slide_state(struct hfp_app *app, bool open_state)
 {
+	app->slider_open = open_state;
 	set_kbd_backlight(open_state);
+	emit_slider_state(app);
 	if (app->rfcomm_fd >= 0) {
 		if (open_state && app->val_callsetup == 1) {
 			LOG("[slide] keypad slid open during incoming call -> ATA");
 			queue_at(app, "ATA");
-		} else if (!open_state && (app->val_call == 1 || app->val_callsetup >= 1)) {
-			LOG("[slide] keypad slid closed during call -> AT+CHUP");
+		} else if (!open_state && app->val_call == 1) {
+			LOG("[slide] keypad slid closed during active call -> AT+CHUP");
 			queue_at(app, "AT+CHUP");
 		}
 	}
@@ -1159,6 +1592,7 @@ static void setup_slide_listener(struct hfp_app *app)
 	if (ioctl(fd, EVIOCGSW(sizeof(sw_bits)), sw_bits) >= 0) {
 		bool is_open = (sw_bits[SW_KEYPAD_SLIDE / (8 * sizeof(unsigned long))] >>
 				(SW_KEYPAD_SLIDE % (8 * sizeof(unsigned long)))) & 1UL;
+		app->slider_open = is_open;
 		set_kbd_backlight(is_open);
 	}
 	LOG("[slide] monitoring keypad slider on %s", SLIDE_EVDEV_PATH);
@@ -1213,6 +1647,7 @@ int main(int argc, char **argv)
 		.ctl_listen_fd = -1,
 		.jack_fd = -1,
 		.slide_fd = -1,
+		.slider_open = true,
 	};
 	struct alsa_bridge_cfg bcfg = {
 		.output_mode = OUTPUT_EARPIECE,
@@ -1227,6 +1662,7 @@ int main(int argc, char **argv)
 	GError *err = NULL;
 	int ret = 1;
 
+	snprintf(app.local_bt_name, sizeof(app.local_bt_name), "%s", LOCAL_BT_ALIAS);
 	get_ctl_sock_path(app.ctl_sock_path, sizeof(app.ctl_sock_path));
 
 	for (int i = 1; i < argc; i++) {
@@ -1249,7 +1685,7 @@ int main(int argc, char **argv)
 		} else {
 			LOG("Usage: %s [--earpiece|--speaker|--headphones] [--mic dual|amic1|amic3] [--no-aec] [--no-ns] [--verbose]",
 			    argv[0]);
-			LOG("       %s --ctl status|answer|hangup|redial|dial <num>|sco-open|earpiece|speaker|headphones|mic dual|amic1|amic3|mute|unmute|vgs <0-15>|vgm <0-15>",
+			LOG("       %s --ctl status|bt-info|pair-start|pair-stop|unpair|answer|hangup|redial|dial <num>|sco-open|earpiece|speaker|headphones|mic dual|amic1|amic3|mute|unmute|vgs <0-15>|vgm <0-15>",
 			    argv[0]);
 			return 1;
 		}
@@ -1291,6 +1727,15 @@ int main(int argc, char **argv)
 		LOG("Register object failed: %s", err ? err->message : "unknown");
 		goto out;
 	}
+
+	app.bluez_prop_sub_id = g_dbus_connection_signal_subscribe(
+		app.sys_bus, "org.bluez", "org.freedesktop.DBus.Properties",
+		"PropertiesChanged", NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
+		on_bluez_properties_changed, &app, NULL);
+	app.bluez_rem_sub_id = g_dbus_connection_signal_subscribe(
+		app.sys_bus, "org.bluez", "org.freedesktop.DBus.ObjectManager",
+		"InterfacesRemoved", NULL, NULL, G_DBUS_SIGNAL_FLAGS_NONE,
+		on_bluez_interfaces_removed, &app, NULL);
 
 	if (setup_sco_listener(&app) < 0)
 		goto out;
@@ -1336,6 +1781,10 @@ out:
 		g_source_remove(app.adapter_timer_id);
 	if (app.bluez_watch_id)
 		g_bus_unwatch_name(app.bluez_watch_id);
+	if (app.bluez_prop_sub_id && app.sys_bus)
+		g_dbus_connection_signal_unsubscribe(app.sys_bus, app.bluez_prop_sub_id);
+	if (app.bluez_rem_sub_id && app.sys_bus)
+		g_dbus_connection_signal_unsubscribe(app.sys_bus, app.bluez_rem_sub_id);
 	if (app.reg_id)
 		g_dbus_connection_unregister_object(app.sys_bus, app.reg_id);
 	if (app.sys_bus)

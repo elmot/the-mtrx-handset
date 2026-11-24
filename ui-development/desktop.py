@@ -194,6 +194,7 @@ class DesktopUiHarness:
             name = " ".join(parts[1:]) if len(parts) > 1 else "Pixel 8 Pro"
             self.win.paired_device_name = name
             self.win.bt_connected = True
+            self.win.status_banner = f"PAIRED: {name}"
             self.pairing_timer.stop()
             self.set_screen("home")
         elif cmd == "timeout":
