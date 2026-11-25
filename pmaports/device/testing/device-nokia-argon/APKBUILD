@@ -26,9 +26,6 @@ subpackages="
 makedepends="devicepkg-dev mipi-dbi-cmd"
 _panel="nokia,argon-gc9305-v2-panel"
 
-# removed:
-# 	nokia-argon-sway.conf
-#	sxmo_deviceprofile_nokia,argon.sh
 source="
 	00-nokia-argon-display.files
 	60-nokia-argon-leds.rules
@@ -62,10 +59,6 @@ package() {
 			"$pkgdir"/usr/lib/udev/rules.d/60-nokia-argon-leds.rules
 	install -Dm644 "$srcdir"/61-nokia-argon-keypad.hwdb \
 			"$pkgdir"/usr/lib/udev/hwdb.d/61-nokia-argon-keypad.hwdb
-#	install -Dm644 "$srcdir"/nokia-argon-sway.conf \
-#			"$pkgdir"/etc/sway/config.d/nokia-argon.conf
-#	install -Dm755 "$srcdir"/sxmo_deviceprofile_nokia,argon.sh \
-#			"$pkgdir"/usr/bin/sxmo_deviceprofile_nokia,argon.sh
     install -Dm644 "$srcdir"/blacklist-modem.conf \
     		"$pkgdir"/etc/modprobe.d/blacklist-modem.conf
 }
