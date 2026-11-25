@@ -1,0 +1,59 @@
+# Maintainer:
+pkgname=nokia-ui
+pkgver=0.1.0
+pkgrel=11
+pkgdesc="Minimal Python + Slint KMS/DRM UI for Nokia 8110 4G"
+url="https://postmarketos.org"
+arch="noarch"
+license="GPL-2.0-only"
+options="!check"
+depends="font-dejavu font-terminus py3-slint"
+subpackages="$pkgname-openrc"
+install="$pkgname-openrc.post-install"
+source="
+	main.py
+	main.slint
+	ui_common.slint
+	screen_home.slint
+	screen_incoming_call.slint
+	screen_active_call.slint
+	screen_call_ended.slint
+	screen_unpair.slint
+	screen_pairing.slint
+	screen_power_off.slint
+	nokia-ui.initd
+	nokia-ui-openrc.post-install
+"
+builddir="$srcdir"
+
+package() {
+	install -Dm755 "$builddir/main.py" \
+		"$pkgdir/usr/share/nokia-ui/main.py"
+	for _f in "$builddir"/*.slint; do
+		install -Dm644 "$_f" \
+			"$pkgdir/usr/share/nokia-ui/$(basename "$_f")"
+	done
+}
+
+openrc() {
+	install_if="$pkgname=$pkgver-r$pkgrel openrc"
+	install -Dm755 "$builddir/nokia-ui.initd" \
+		"$subpkgdir/etc/init.d/nokia-ui"
+	install -dm755 "$subpkgdir/etc/runlevels/default"
+	ln -s /etc/init.d/nokia-ui \
+		"$subpkgdir/etc/runlevels/default/nokia-ui"
+}
+sha512sums="
+3e457abd7dfe22ece7a65a4ce10166f5497c0bd495ff1538b54e93949cce589089486059ca5b2fa3de004769127e5315fd93d2385d8d301c4fca8bc3be416e2c  main.py
+8e8e717601c9d5d07e83a14245bb181ebdbb4995bf5c125e3c8f59f27aba2b653a5f7250701263256ce76b5b5050af75904561d4270fb8c5940cff8a1be625d5  main.slint
+6784bf68d7a4f99ad84dd232eec0957b9708654ae03fb2936684ad60d41e1b779a07df6770f0768fa71b8063f383b62517e73553aff05248ee06cc40d730efcd  ui_common.slint
+c8bcff7c183dfba272e667b0db70307693427df4a40e3456c24f60d1232fc47b634806cc7986c584ee0359d76df0f06f5f161ea12a912f38c5d67c183c16d90c  screen_home.slint
+c7a5bfa7d5249192af1290e256ba7e0b6458e18ec2132428e670f2bc1c626b30016859cec270e6a262576e6a2cbbc7a1cb1f86bbdde07541bc9a96a5621f7c97  screen_incoming_call.slint
+db576cf9e6f527c4ea65eef3b1d874e4902e8079d045d37c5b005883f5b5d6c50c942b24e086f05e38225518bd9ffcba7373d4645229f2bdefab063a1fee4008  screen_active_call.slint
+0eb3ad2348a86297eb4aee91036d646d286e1fe731450cf4b40e6d15442d539f41cff6e71a977c5fb7f23339d11417bf2b4a3ed234e653528905e66f7bcbd492  screen_call_ended.slint
+ae08f1bab2583c25b7d80942179e7a0ed30d44a9675ba1dae618d4a8cfb20eb87a837f45de45089a321833e8efb35ce1ce749eefb2f39697ecc26af72ece49a6  screen_unpair.slint
+0f7568af039d513bf9cbad7ef3b9a0b9479669bb7f51a5586d400a01fbd396bf5e6f2cb3607c0ab9a78be8c20d3ed4eba10fa365337a45db72305a3b302c0342  screen_pairing.slint
+079d6710a14e4eb2ca63c7c90993b040f50366af1e54a0608579db71ece16d62582307ba0d1ed2009ebf38bcbc30b79122adbb62d5bee2aaefc216d32b51439d  screen_power_off.slint
+1c1192e610b65472c6c5bc431f50053ffa30017fe6ee2ae2d17c773d651aeff4f9087e8c176a6af5a88088acf1eed51bec019e088ec6936b11d9e87c34425d14  nokia-ui.initd
+b2bfe6d658ab4dd0f63dba59d9b03ba571785b94fd607d33865879ebedfef21ccc16af2d478b45f724fe77a90d0751ca14dc8fed839aea96639cfd0fa673e2d8  nokia-ui-openrc.post-install
+"

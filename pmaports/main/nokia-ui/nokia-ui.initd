@@ -13,7 +13,7 @@ depend() {
 }
 
 start_pre() {
-	export SLINT_BACKEND="linuxkms-software"
+	export SLINT_BACKEND="linuxkms-skia-software"
 	export XDG_RUNTIME_DIR="/run/user/10000"
 	echo 14 > /sys/class/backlight/backlight/brightness 2>/dev/null || true
 }

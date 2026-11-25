@@ -1,0 +1,158 @@
+export global Theme {
+    out property <color> bg: #0B1117;
+    out property <color> surface: #141E28;
+    out property <color> border: #253545;
+    out property <color> accent: #00E5FF;
+    out property <color> success: #2EE59D;
+    out property <color> warning: #FFB020;
+    out property <color> danger: #FF5252;
+    out property <color> text-primary: #F4F7FA;
+    out property <color> text-muted: #7D8FA3;
+    out property <color> text-disabled: #4A5868;
+}
+
+export component StatusBar inherits Rectangle {
+    in property <string> status-text: "READY";
+    in property <color> status-color: Theme.text-primary;
+    in property <int> battery-percent: 85;
+
+    height: 30px;
+    background: Theme.surface;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: space-between;
+
+        Text {
+            text: root.status-text;
+            color: root.status-color;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        HorizontalLayout {
+            spacing: 5px;
+            alignment: end;
+
+            Text {
+                text: root.battery-percent + "%";
+                color: Theme.text-muted;
+                font-size: 10px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            // Battery icon aligned vertically
+            Rectangle {
+                width: 24px;
+                height: 30px;
+
+                Rectangle {
+                    x: 0px;
+                    y: 9px;
+                    width: 20px;
+                    height: 12px;
+                    border-width: 1.5px;
+                    border-color: Theme.text-muted;
+                    border-radius: 2px;
+
+                    Rectangle {
+                        x: 2px;
+                        y: 2px;
+                        width: Math.max(2px, 16px * Math.clamp(root.battery-percent, 0, 100) / 100);
+                        height: 8px;
+                        border-radius: 1px;
+                        background: root.battery-percent <= 20 ? Theme.danger : Theme.success;
+                    }
+                }
+
+                // Battery positive terminal
+                Rectangle {
+                    x: 20px;
+                    y: 12px;
+                    width: 2.5px;
+                    height: 6px;
+                    border-top-right-radius: 1px;
+                    border-bottom-right-radius: 1px;
+                    background: Theme.text-muted;
+                }
+            }
+        }
+    }
+
+    // Bottom divider
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: 100%;
+        background: Theme.border;
+    }
+}
+
+export component SoftkeyBar inherits Rectangle {
+    in property <string> left-label: "";
+    in property <string> right-label: "";
+    in property <bool> left-enabled: true;
+    in property <bool> right-enabled: true;
+    in property <color> left-color: Theme.accent;
+    in property <color> right-color: Theme.text-primary;
+
+    callback left-clicked();
+    callback right-clicked();
+
+    height: 36px;
+    background: Theme.surface;
+
+    // Top divider
+    Rectangle {
+        y: 0px;
+        height: 1px;
+        width: 100%;
+        background: Theme.border;
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        alignment: space-between;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            TouchArea {
+                enabled: root.left-enabled && root.left-label != "";
+                clicked => { root.left-clicked(); }
+            }
+            Text {
+                width: 100%;
+                height: 100%;
+                text: root.left-label;
+                color: !root.left-enabled ? Theme.text-disabled : root.left-color;
+                font-size: 13px;
+                font-weight: 700;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            TouchArea {
+                enabled: root.right-enabled && root.right-label != "";
+                clicked => { root.right-clicked(); }
+            }
+            Text {
+                width: 100%;
+                height: 100%;
+                text: root.right-label;
+                color: !root.right-enabled ? Theme.text-disabled : root.right-color;
+                font-size: 13px;
+                font-weight: 700;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

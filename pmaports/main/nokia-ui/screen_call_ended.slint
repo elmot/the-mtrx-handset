@@ -1,0 +1,72 @@
+import { Theme, StatusBar, SoftkeyBar } from "ui_common.slint";
+
+// Screen 4: Call Terminated Screen (CALL_TERMINATED)
+export component CallEndedScreen inherits Rectangle {
+    in property <int> battery-percent: 85;
+
+    width: 240px;
+    height: 320px;
+    background: Theme.bg;
+
+    VerticalLayout {
+        StatusBar {
+            status-text: "CALL ENDED";
+            status-color: Theme.danger;
+            battery-percent: root.battery-percent;
+        }
+
+        // Main Viewport
+        Rectangle {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 16px;
+                alignment: center;
+
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 56px;
+                        height: 56px;
+                        border-radius: 28px;
+                        background: Theme.surface;
+                        border-width: 2px;
+                        border-color: Theme.danger;
+
+                        Path {
+                            x: 16px;
+                            y: 16px;
+                            width: 24px;
+                            height: 24px;
+                            viewbox-x: 0;
+                            viewbox-y: 0;
+                            viewbox-width: 24;
+                            viewbox-height: 24;
+                            commands: "M 5 5 L 19 19 M 19 5 L 5 19";
+                            stroke: Theme.danger;
+                            stroke-width: 2.5px;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "CALL ENDED";
+                    color: Theme.text-primary;
+                    font-size: 20px;
+                    font-weight: 800;
+                    horizontal-alignment: center;
+                    letter-spacing: 1px;
+                }
+            }
+        }
+
+        // Inactive softkeys during 1.5s auto-return
+        SoftkeyBar {
+            left-label: "";
+            right-label: "";
+            left-enabled: false;
+            right-enabled: false;
+        }
+    }
+}

@@ -1,0 +1,133 @@
+import { Theme, StatusBar, SoftkeyBar } from "ui_common.slint";
+
+// Screen 3: Active Call Screen (ACTIVE_CALL)
+export component ActiveCallScreen inherits Rectangle {
+    in property <string> caller-id: "Unknown";
+    in property <bool> speaker-mode: false;
+    in property <int> volume-percent: 65;
+    in property <bool> slider-open: true;
+    in property <int> battery-percent: 85;
+
+    callback toggle-sink-clicked();
+    callback end-call-clicked();
+
+    width: 240px;
+    height: 320px;
+    background: Theme.bg;
+
+    VerticalLayout {
+        StatusBar {
+            status-text: "IN CALL";
+            status-color: Theme.accent;
+            battery-percent: root.battery-percent;
+        }
+
+        // Main Viewport
+        Rectangle {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 12px;
+                alignment: center;
+
+                // Caller ID box
+                Rectangle {
+                    height: 48px;
+                    border-radius: 8px;
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: Theme.border;
+
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: root.caller-id != "" ? root.caller-id : "Active Call";
+                        color: Theme.text-primary;
+                        font-size: 16px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // Audio sink indicator
+                Rectangle {
+                    height: 32px;
+                    border-radius: 6px;
+                    background: Theme.surface;
+                    border-width: 1px;
+                    border-color: root.speaker-mode ? Theme.warning : Theme.border;
+
+                    Text {
+                        width: 100%;
+                        height: 100%;
+                        text: root.speaker-mode ? "SINK: SPEAKER" : "SINK: EARPIECE";
+                        color: root.speaker-mode ? Theme.warning : Theme.accent;
+                        font-size: 12px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Volume gauge
+                VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text {
+                            text: "VOLUME";
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: Math.clamp(root.volume-percent, 0, 100) + "%";
+                            color: Theme.text-primary;
+                            font-size: 11px;
+                            font-weight: 700;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 14px;
+                        border-radius: 4px;
+                        background: Theme.surface;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        Rectangle {
+                            x: 2px;
+                            y: 2px;
+                            width: (parent.width - 4px) * Math.clamp(root.volume-percent, 0, 100) / 100;
+                            height: parent.height - 4px;
+                            border-radius: 2px;
+                            background: root.speaker-mode ? Theme.warning : Theme.accent;
+                        }
+                    }
+                }
+
+                // Slider state
+                Text {
+                    text: root.slider-open ? "SLIDER: OPEN" : "SLIDER: CLOSED";
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        SoftkeyBar {
+            left-label: root.speaker-mode ? "EAR" : "SPKR";
+            right-label: "END";
+            left-color: Theme.accent;
+            right-color: Theme.danger;
+            left-clicked => { root.toggle-sink-clicked(); }
+            right-clicked => { root.end-call-clicked(); }
+        }
+    }
+}
