@@ -3,6 +3,8 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$/pmbootstrap">
       <sourceFolder url="file://$MODULE_DIR$/pmbootstrap/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/pmbootstrap/build" />
+      <excludeFolder url="file://$MODULE_DIR$/pmbootstrap/pmbootstrap.egg-info" />
     </content>
     <orderEntry type="sourceFolder" forTests="false" />
   </component>

@@ -3,7 +3,6 @@ set -euo pipefail
 set +x
 
 ffmpeg -version >/dev/null 2>&1 || { echo >&2 "Error: ffmpeg is required."; exit 1; }
-fastboot --version >/dev/null 2>&1 || { echo >&2 "Error: fastboot is required."; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_IMG="${1:-$SCRIPT_DIR/splash.png}"
@@ -47,14 +46,5 @@ fi
 
 echo "Building $OUT_IMG..."
 cat "$HEADER_FILE" "$RAW_FILE" > "$OUT_IMG"
-
-echo "Checking for fastboot device..."
-if ! fastboot devices | grep -q "fastboot"; then
-    echo "Error: no device detected in fastboot mode." >&2
-    exit 1
-fi
-
-echo "Flashing $OUT_IMG to splash partition..."
-fastboot flash splash "$OUT_IMG"
 
 echo "Done."

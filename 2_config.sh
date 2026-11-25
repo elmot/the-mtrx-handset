@@ -30,31 +30,21 @@ pmbootstrap init
 
 echo
 echo "=== Precompiled Heavyweight APKs (kernel & py3-slint) ==="
-echo "Notice: These precompiled binaries are downloaded from GitHub Releases"
-echo "and are NOT built on your computer."
+echo "Notice: These precompiled binaries are taken from the 'prebuilt-apks' directory"
+echo "of this repository and are NOT built on your computer."
 echo "However, building them from source locally can take up to several hours,"
-echo "so downloading is strongly recommended."
-printf "Download precompiled APKs? [Y/n]: "
+echo "so using them is strongly recommended."
+echo "Use precompiled APKs? [Y/n]:"
 read -r _ans
 case "$_ans" in
     ""|[Yy]|[Yy][Ee][Ss])
-        BASE_URL="https://github.com/elmot/the-mtrx-handset/releases/download/precompiled-heavyweight-apks"
-        PKG_DIR="$WORK_DIR/packages/v26.06/armv7"
-        KEY_DIR="$WORK_DIR/config_apk_keys"
-        mkdir -p "$PKG_DIR" "$KEY_DIR"
-
-        for apk in \
-            linux-postmarketos-qcom-msm8916-6.12.1-r8.apk \
-            py3-slint-1.19.0-r0.apk
-        do
-            echo "Downloading $apk..."
-            curl -fL --retry 3 -o "$PKG_DIR/$apk" "$BASE_URL/$apk" || exit 1
-        done
-
-        echo "Downloading build-pub-key.tgz..."
-        curl -fL --retry 3 -o "$KEY_DIR/build-pub-key.tgz" "$BASE_URL/build-pub-key.tgz" || exit 1
-        tar -xzf "$KEY_DIR/build-pub-key.tgz" -C "$KEY_DIR" || exit 1
-        rm -f "$KEY_DIR/build-pub-key.tgz"
+        PREBUILT_DIR=$(realpath -m "$(dirname "$0")/prebuilt-apks")
+        echo "Copying precompiled APKs and signing keys..."
+        # pmbootstrap owns the work dir as root; the chroot user (uid 12345) must write the packages index
+        sudo mkdir -p "$WORK_DIR"/config_apk_keys || exit 1
+        sudo cp -rf "$PREBUILT_DIR"/packages "$WORK_DIR"/ || exit 1
+        sudo cp -f "$PREBUILT_DIR"/config_apk_keys/pmos@local-*.rsa.pub "$WORK_DIR"/config_apk_keys/ || exit 1
+        sudo chown -R 12345:12345 "$WORK_DIR"/packages || exit 1
 
         echo "Rebuilding pmbootstrap APKINDEX..."
         pmbootstrap index

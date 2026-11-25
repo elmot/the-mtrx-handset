@@ -76,6 +76,25 @@ Because we embrace AI-assisted programming to prototype and iterate rapidly, **t
 
 ---
 
+## 🔧 Patching the Phone
+
+The patch process is driven by five scripts in the project root. Run them from the project directory, in order:
+
+1. `./1_install-tools.sh`: creates the Python virtual, installs `required tools, and writes `activate.sh` script. Optionally installs UI development tools.
+2. `./2_config.sh`: interactively configures build environment.
+3. `./3_build.sh`: builds binaries to be flashed.
+4. `./4_flash_mod.sh`: flashes the kernel and the root filesystem to the phone. Before running it, prepare the phone as follows:
+   - Flash the `lk2nd` bootloader as described in the [Nokia 8110 4G wiki page](https://wiki.nura.eco/wiki/Nokia_8110_4G_(nokia-argon)#Installing_lk2nd).
+   - Enter lk2nd fastboot mode: long-press the power button (about 10 seconds) while holding the Down button.
+   - Connect the phone to the computer with the USB cable.
+
+The flashing process takes about 5 minutes.
+5. `./5_flash_splash.sh`: flashes the boot splash screen. It asks whether to rebuild the splash from `a source picture.
+
+After step 5 the phone boots into the mod.
+
+---
+
 ## 🤝 Contributing
 
 We welcome thoughtful contributions, bug fixes, and hardware testing.
