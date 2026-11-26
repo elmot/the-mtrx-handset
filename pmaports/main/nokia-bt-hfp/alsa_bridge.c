@@ -25,9 +25,9 @@
 /*
  * Q6ASM hands the next ring period to the DSP as soon as the previous one is
  * consumed, i.e. one period ahead of hw_ptr and without looking at appl_ptr.
- * Keep a 4-period cushion so the DSP never fetches a stale/half-written period.
+ * Keep a 3-period cushion so the DSP never fetches a stale/half-written period.
  */
-#define PLAY_PREFILL_SAMPLES (HFP_FRAME_SAMPLES * 4)
+#define PLAY_PREFILL_SAMPLES (HFP_FRAME_SAMPLES * 3)
 #define DRIFT_TARGET_SAMPLES (PLAY_PREFILL_SAMPLES - HFP_FRAME_SAMPLES / 2)
 #define DRIFT_LO_SAMPLES (DRIFT_TARGET_SAMPLES - HFP_FRAME_SAMPLES)
 #define DRIFT_HI_SAMPLES (DRIFT_TARGET_SAMPLES + HFP_FRAME_SAMPLES * 2)

@@ -1,7 +1,7 @@
 # Maintainer:
 pkgname=nokia-bt-hfp
 pkgver=0.1.0
-pkgrel=18
+pkgrel=19
 pkgdesc="Nokia 8110 4G Bluetooth HFP-HF + Q6AFE INT_BT_SCO audio bridge with dual-mic noise cancellation"
 url="https://postmarketos.org"
 arch="armv7"
@@ -64,7 +64,7 @@ openrc() {
 }
 sha512sums="
 c2dce8c6b8af0b5b371ba9e32aeb2d4f26a45a5f62d9621ddff39e7b19d7a684f618d4fd53f7daba539f597b8d7e77cdf160a1d28f31c1fdedcf0cd1b1e09451  Makefile
-78517376ad1230ffaf4b1d3f2f27e6170b3274dcf4cecf15171b9c83868e754c8a5965e41750d8d904e2d2a0d71bcff462babba7e960f29dff9b41057d886b2d  alsa_bridge.c
+ec0539c704d3aba8d85721809e0ca2bfa36e631ea4eb98ce1d69d97dc29e15920fc58df1176c48741df4a303ffdf710d5699de74bbd7f3026811ad70bd067757  alsa_bridge.c
 700fb46b802f1a03b01affaed2c5ab8e92228be5f10415ce487e205c8a1cd926eb4cf4c366dd24b5a93a701fd8119ee582c6c167ff3288bb7d46be0e86795f92  alsa_bridge.h
 163f3116ebe7973b8972d380063374c79635ff66d3bdeda87884a6dada01eaf19a74072f1ce77b499ea3ee395d06d0b3285e37af4ea58f43e149ab91b548dccf  nokia_bt_hfp.c
 3a61df0d8e094b4fd9cb7e2bc87e9eba36787941d26cbe9c7e539bf3a492bb823ddb1779827645e66d3004d63504b76c07fd6a8d05a0c796298315e3d33e9250  nokia-bt-hfp.initd
