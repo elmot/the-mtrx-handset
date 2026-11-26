@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+
+name="pipewire"
+description="PipeWire multimedia service"
+command="/usr/bin/pipewire"
+_pw_user="$(awk -F: '$3 == 10000 { print $1; exit }' /etc/passwd)"
+command_user="${_pw_user:-root}"
+supervisor=supervise-daemon
+respawn_delay=2
+respawn_max=0
+pidfile="/run/pipewire.pid"
+
+depend() {
+	need dbus
+	after localmount
+}
+
+start_pre() {
+	_pw_uid=10000
+	_pw_home="$(awk -F: '$3 == 10000 { print $6; exit }' /etc/passwd)"
+	if [ -z "$_pw_user" ]; then
+		_pw_uid=0
+		_pw_home="/root"
+	fi
+	mkdir -p "/run/user/$_pw_uid"
+	chown "$_pw_uid:$_pw_uid" "/run/user/$_pw_uid"
+	chmod 700 "/run/user/$_pw_uid"
+	export XDG_RUNTIME_DIR="/run/user/$_pw_uid"
+	export HOME="${_pw_home:-/root}"
+}

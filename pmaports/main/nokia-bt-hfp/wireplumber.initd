@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+
+name="wireplumber"
+description="WirePlumber PipeWire session manager"
+command="/usr/bin/wireplumber"
+_wp_user="$(awk -F: '$3 == 10000 { print $1; exit }' /etc/passwd)"
+command_user="${_wp_user:-root}"
+supervisor=supervise-daemon
+respawn_delay=2
+respawn_max=0
+pidfile="/run/wireplumber.pid"
+
+depend() {
+	need dbus pipewire
+	after localmount bluetooth
+}
+
+start_pre() {
+	_wp_uid=10000
+	_wp_home="$(awk -F: '$3 == 10000 { print $6; exit }' /etc/passwd)"
+	if [ -z "$_wp_user" ]; then
+		_wp_uid=0
+		_wp_home="/root"
+	fi
+	mkdir -p "/run/user/$_wp_uid"
+	chown "$_wp_uid:$_wp_uid" "/run/user/$_wp_uid"
+	chmod 700 "/run/user/$_wp_uid"
+	export XDG_RUNTIME_DIR="/run/user/$_wp_uid"
+	export HOME="${_wp_home:-/root}"
+}

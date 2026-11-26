@@ -1,7 +1,7 @@
 # Maintainer:
 pkgname=nokia-bt-hfp
 pkgver=0.1.0
-pkgrel=12
+pkgrel=13
 pkgdesc="Nokia 8110 4G Bluetooth HFP-HF + Q6AFE INT_BT_SCO audio bridge with dual-mic noise cancellation"
 url="https://postmarketos.org"
 arch="armv7"
@@ -10,7 +10,6 @@ options="!check"
 depends="bluez libnotify pipewire pipewire-pulse pulseaudio-utils wireplumber"
 makedepends="alsa-lib-dev glib-dev speexdsp-dev"
 subpackages="$pkgname-openrc $pkgname-systemd"
-install="$pkgname-openrc.post-install"
 source="
 	Makefile
 	alsa_bridge.c
@@ -18,6 +17,9 @@ source="
 	nokia_bt_hfp.c
 	nokia-bt-hfp.initd
 	nokia-bt-hfp-openrc.post-install
+	pipewire.initd
+	pipewire-pulse.initd
+	wireplumber.initd
 	nokia-bt-hfp.service
 	85-nokia-bt-hfp.preset
 	nokia-bt-hfp-dbus.conf
@@ -49,6 +51,18 @@ openrc() {
 	depends="bluez-openrc"
 	install -Dm755 "$builddir/nokia-bt-hfp.initd" \
 		"$subpkgdir/etc/init.d/nokia-bt-hfp"
+	install -Dm755 "$builddir/pipewire.initd" \
+		"$subpkgdir/etc/init.d/pipewire"
+	install -Dm755 "$builddir/pipewire-pulse.initd" \
+		"$subpkgdir/etc/init.d/pipewire-pulse"
+	install -Dm755 "$builddir/wireplumber.initd" \
+		"$subpkgdir/etc/init.d/wireplumber"
+
+	install -dm755 "$subpkgdir/etc/runlevels/default"
+	for _svc in nokia-bt-hfp pipewire pipewire-pulse wireplumber; do
+		ln -s "/etc/init.d/$_svc" \
+			"$subpkgdir/etc/runlevels/default/$_svc"
+	done
 }
 
 systemd() {
@@ -68,8 +82,11 @@ c2dce8c6b8af0b5b371ba9e32aeb2d4f26a45a5f62d9621ddff39e7b19d7a684f618d4fd53f7daba
 31bb8c9c72321eea1f9c8a07baf499dbfd96055edd5b7468a564f34c96ca06e0ae8baa034374a5004636cb0c2c56d0d996ebee9d541364c4e472d52afdad9086  alsa_bridge.c
 700fb46b802f1a03b01affaed2c5ab8e92228be5f10415ce487e205c8a1cd926eb4cf4c366dd24b5a93a701fd8119ee582c6c167ff3288bb7d46be0e86795f92  alsa_bridge.h
 39f12c5d0df3f988ed30c5c2a42896f004fdd4f538225a945946d481623a83417ee36e6f6153824b58a0d8b39e16a637a1a8566ae2e2a0eb965027c704241006  nokia_bt_hfp.c
-6293bb2f7a3c0a132f92526ec0d744aa6c85d24e07845069c629f7a275c2c7ce11041d3c238bee67811e4ed654b16402afa51875095e5af1325aba5af0e2c079  nokia-bt-hfp.initd
-4f9da285efbd4ee4c993563e9d71150b500e28fbcd6e21090cab8b5b0f752825fba8dc351eea85296496eb63d50683790840ad400910e1abde342dc8eada4bec  nokia-bt-hfp-openrc.post-install
+ca8166c8bee25dc7f068eb679c5ea6a9da580fef9d95d5c7577ab56b48198990a8efda366b86b7e6392e054868e36b3dac27469ad106f86b935decb96daf8378  nokia-bt-hfp.initd
+6a35360baa5cf7cd25207f63d98a673c07c21561eceb6b81acf8d5843782bb7087361d241fba552109a092b7de4cb034657c9c1054c23433345db66004553d61  nokia-bt-hfp-openrc.post-install
+838e0b7a8fadd3fd08548c8270b84c3fe825dc7387dcd3e61283a197280a15a09601c7cdd13575c96da099f9909cd4caddc58b8879ad6e24bdef677aae7ba9ba  pipewire.initd
+b6fe0bdd3e62a5d0af5b6c4442919fdc525e95f3707a64aba28ebd0b676794c46b033d2d7e5beefc90703cc9905bd262943ae9bd8a54b75d5149cc38bf6aa0ce  pipewire-pulse.initd
+1da984668ed90c78107392631bbb6b915003fc3f7710344b35b1bf2d2f39ff9ab7eb6a442967f79850ab2d25896d30238f21c815a2dce66f8f580208e5928cb2  wireplumber.initd
 dffe8962417836c14ee4f372a50067a166398a98029701ce53dd4873bc14576fc1eaffe3ab8d773681d89e08014873218b2b192ef6bf79288d5a246b5e5296a3  nokia-bt-hfp.service
 a36b8201300d4efb78bd75553078dab19600a9524d88c6837b2bb665c3ebeef5835b1d8b0a0fe7bf942e084fee783d4f2127dea17edc885c2d40b7f133bd8729  85-nokia-bt-hfp.preset
 05716644ba1e164d234054e865eca235890124eae7da18668fa4c340721bd7f358a806b4a1a8ffef1a1efc7037cd452ee15e1778d69f76007abd909d5867c76c  nokia-bt-hfp-dbus.conf

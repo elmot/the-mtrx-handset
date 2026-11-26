@@ -6,17 +6,26 @@ command="/usr/bin/nokia-bt-hfp"
 command_args="--earpiece --mic dual"
 _hfp_user="$(awk -F: '$3 == 10000 { print $1; exit }' /etc/passwd)"
 command_user="${_hfp_user:-root}"
-command_background=true
+supervisor=supervise-daemon
+respawn_delay=2
+respawn_max=0
 pidfile="/run/nokia-bt-hfp.pid"
 
 depend() {
-	need dbus bluetooth
-	after localmount
+	need dbus bluetooth pipewire wireplumber
+	after localmount pipewire-pulse
 }
 
 start_pre() {
-	mkdir -p /run/user/10000
-	chown 10000:10000 /run/user/10000
-	chmod 700 /run/user/10000
-	export XDG_RUNTIME_DIR="/run/user/10000"
+	_hfp_uid=10000
+	_hfp_home="$(awk -F: '$3 == 10000 { print $6; exit }' /etc/passwd)"
+	if [ -z "$_hfp_user" ]; then
+		_hfp_uid=0
+		_hfp_home="/root"
+	fi
+	mkdir -p "/run/user/$_hfp_uid"
+	chown "$_hfp_uid:$_hfp_uid" "/run/user/$_hfp_uid"
+	chmod 700 "/run/user/$_hfp_uid"
+	export XDG_RUNTIME_DIR="/run/user/$_hfp_uid"
+	export HOME="${_hfp_home:-/root}"
 }
