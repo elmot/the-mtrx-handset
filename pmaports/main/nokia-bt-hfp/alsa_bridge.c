@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <speex/speex_echo.h>
 #include <speex/speex_preprocess.h>
 #include <stdatomic.h>
@@ -19,7 +20,17 @@
 #define HFP_RATE 8000
 #define HFP_CHANNELS 1
 #define HFP_FRAME_SAMPLES 160 /* 20 ms @ 8 kHz = 320 B (>= Q6ASM CAPTURE_MIN_PERIOD_SIZE) */
-#define HFP_BUFFER_SAMPLES (HFP_FRAME_SAMPLES * 4)
+#define HFP_PERIODS 8 /* Q6ASM PLAYBACK/CAPTURE_MAX_NUM_PERIODS */
+#define HFP_BUFFER_SAMPLES (HFP_FRAME_SAMPLES * HFP_PERIODS)
+/*
+ * Q6ASM hands the next ring period to the DSP as soon as the previous one is
+ * consumed, i.e. one period ahead of hw_ptr and without looking at appl_ptr.
+ * Keep a 4-period cushion so the DSP never fetches a stale/half-written period.
+ */
+#define PLAY_PREFILL_SAMPLES (HFP_FRAME_SAMPLES * 4)
+#define DRIFT_TARGET_SAMPLES (PLAY_PREFILL_SAMPLES - HFP_FRAME_SAMPLES / 2)
+#define DRIFT_LO_SAMPLES (DRIFT_TARGET_SAMPLES - HFP_FRAME_SAMPLES)
+#define DRIFT_HI_SAMPLES (DRIFT_TARGET_SAMPLES + HFP_FRAME_SAMPLES * 2)
 #define AEC_TAIL_SAMPLES 800 /* 100 ms acoustic echo tail */
 #define REF_RING_SLOTS 4
 #define NLMS_TAPS 64 /* 8 ms dual-mic ambient path span @ 8 kHz (power of 2) */
@@ -59,6 +70,7 @@ struct alsa_bridge {
 	pthread_t ul_thread;
 	_Atomic bool running;
 	_Atomic bool stop_req;
+	_Atomic unsigned int xruns;
 	bool mixers_active;
 
 	snd_pcm_t *cap_sco;
@@ -452,7 +464,7 @@ static int open_pcm(int card, int dev, snd_pcm_stream_t dir,
 	snd_pcm_sw_params_alloca(&sw);
 	snd_pcm_sw_params_current(pcm, sw);
 	snd_pcm_sw_params_set_start_threshold(
-		pcm, sw, dir == SND_PCM_STREAM_PLAYBACK ? period : 1);
+		pcm, sw, dir == SND_PCM_STREAM_PLAYBACK ? PLAY_PREFILL_SAMPLES : 1);
 	if ((err = snd_pcm_sw_params(pcm, sw)) < 0) {
 		LOG("[alsa] sw_params(%s) failed: %s", pcm_name, snd_strerror(err));
 		snd_pcm_close(pcm);
@@ -480,6 +492,26 @@ static snd_pcm_sframes_t xrun_recover(struct alsa_bridge *br, snd_pcm_t *pcm,
 	return err;
 }
 
+static int pcm_write_silence(struct alsa_bridge *br, snd_pcm_t *pcm,
+			     unsigned int ch, snd_pcm_uframes_t frames)
+{
+	static const int16_t zeros[HFP_FRAME_SAMPLES * 2];
+
+	if (ch > 2)
+		return -EINVAL;
+	while (frames > 0 && !br->stop_req) {
+		snd_pcm_uframes_t chunk = frames < HFP_FRAME_SAMPLES ? frames : HFP_FRAME_SAMPLES;
+		snd_pcm_sframes_t n = snd_pcm_writei(pcm, zeros, chunk);
+		if (n > 0)
+			frames -= (snd_pcm_uframes_t)n;
+		else if (n == -EAGAIN)
+			snd_pcm_wait(pcm, 100);
+		else
+			return (int)n;
+	}
+	return 0;
+}
+
 static int pcm_xfer(struct alsa_bridge *br, snd_pcm_t *pcm, int16_t *buf,
 		    snd_pcm_uframes_t frames, unsigned int ch, bool is_write,
 		    const char *tag)
@@ -491,19 +523,64 @@ static int pcm_xfer(struct alsa_bridge *br, snd_pcm_t *pcm, int16_t *buf,
 		snd_pcm_sframes_t n = is_write
 			? snd_pcm_writei(pcm, ptr, frames - off)
 			: snd_pcm_readi(pcm, ptr, frames - off);
+		int err = 0;
+
 		if (n > 0) {
 			off += (snd_pcm_uframes_t)n;
-		} else if (n == -EAGAIN) {
-			int w = snd_pcm_wait(pcm, 100);
-			if (w < 0 && w != -EAGAIN &&
-			    xrun_recover(br, pcm, w, tag) < 0)
-				return -1;
-		} else if (n < 0) {
-			if (xrun_recover(br, pcm, (int)n, tag) < 0)
-				return -1;
+			continue;
 		}
+		if (n == -EAGAIN) {
+			int w = snd_pcm_wait(pcm, 100);
+			if (w < 0 && w != -EAGAIN)
+				err = w;
+		} else if (n < 0) {
+			err = (int)n;
+		}
+		if (!err)
+			continue;
+
+		if (!br->stop_req && (err == -EPIPE || err == -ESTRPIPE))
+			LOG("[alsa] %s xrun #%u (%s), recovering", tag,
+			    ++br->xruns, snd_strerror(err));
+		if (xrun_recover(br, pcm, err, tag) < 0)
+			return -1;
+		/* Restart playback with a full cushion, not a single period */
+		if (is_write)
+			pcm_write_silence(br, pcm, ch, PLAY_PREFILL_SAMPLES);
 	}
 	return br->stop_req ? -1 : 0;
+}
+
+static void set_thread_rt(const char *tag, int prio)
+{
+	struct sched_param sp = { .sched_priority = prio };
+	int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+
+	if (rc != 0)
+		LOG("[alsa] %s: SCHED_FIFO unavailable (%s)", tag, strerror(rc));
+}
+
+/* Insert (adj > 0) or drop (adj < 0) one interpolated sample to absorb clock drift */
+static snd_pcm_uframes_t drift_adjust(const int16_t *in, int16_t *out, int adj)
+{
+	const int mid = HFP_FRAME_SAMPLES / 2;
+	int16_t avg = (int16_t)(((int)in[mid - 1] + (int)in[mid]) / 2);
+
+	memcpy(out, in, mid * sizeof(*in));
+	if (adj > 0) {
+		out[mid] = avg;
+		memcpy(out + mid + 1, in + mid,
+		       (HFP_FRAME_SAMPLES - mid) * sizeof(*in));
+		return HFP_FRAME_SAMPLES + 1;
+	}
+	if (adj < 0) {
+		out[mid - 1] = avg;
+		memcpy(out + mid, in + mid + 1,
+		       (HFP_FRAME_SAMPLES - mid - 1) * sizeof(*in));
+		return HFP_FRAME_SAMPLES - 1;
+	}
+	memcpy(out + mid, in + mid, (HFP_FRAME_SAMPLES - mid) * sizeof(*in));
+	return HFP_FRAME_SAMPLES;
 }
 
 static void ref_ring_push(struct alsa_bridge *br, const int16_t *frame)
@@ -554,20 +631,28 @@ static void *downlink_worker(void *arg)
 {
 	struct alsa_bridge *br = arg;
 	int16_t buf[HFP_FRAME_SAMPLES];
-	int16_t silence[HFP_FRAME_SAMPLES] = { 0 };
+	int16_t out[HFP_FRAME_SAMPLES + 1];
 	unsigned int frames = 0;
 	int16_t sec_peak = 0;
+	snd_pcm_uframes_t play_buf = HFP_BUFFER_SAMPLES, play_period = HFP_FRAME_SAMPLES;
+	float fill_avg = DRIFT_TARGET_SAMPLES;
+	int adj = 0;
 	bool verbose;
 
 	pthread_mutex_lock(&br->cfg_lock);
 	verbose = br->cfg.verbose;
 	pthread_mutex_unlock(&br->cfg_lock);
 
-	/* Prefill 2 periods so playback starts smoothly without underrun */
-	pcm_xfer(br, br->play_spk, silence, HFP_FRAME_SAMPLES, 1, true, "dl_pre");
-	pcm_xfer(br, br->play_spk, silence, HFP_FRAME_SAMPLES, 1, true, "dl_pre");
+	set_thread_rt("downlink", 20);
+	snd_pcm_get_params(br->play_spk, &play_buf, &play_period);
+
+	/* Prefill the cushion; playback auto-starts once it is queued */
+	pcm_write_silence(br, br->play_spk, 1, PLAY_PREFILL_SAMPLES);
 
 	while (!br->stop_req) {
+		snd_pcm_uframes_t n_out;
+		snd_pcm_sframes_t avail;
+
 		if (pcm_xfer(br, br->cap_sco, buf, HFP_FRAME_SAMPLES, 1, false,
 			     "dl_cap") < 0)
 			break;
@@ -577,16 +662,33 @@ static void *downlink_worker(void *arg)
 			if (pk > sec_peak)
 				sec_peak = pk;
 			if (++frames % 50 == 0) {
-				LOG("[stat] dl_sco_peak=%d", sec_peak);
+				LOG("[stat] dl_sco_peak=%d dl_fill=%d dl_adj=%d xruns=%u",
+				    sec_peak, (int)fill_avg, adj, br->xruns);
 				sec_peak = 0;
 			}
 		}
 
-		if (pcm_xfer(br, br->play_spk, buf, HFP_FRAME_SAMPLES, 1, true,
+		n_out = drift_adjust(buf, out, adj);
+		if (pcm_xfer(br, br->play_spk, out, n_out, 1, true,
 			     "dl_play") < 0)
 			break;
 
 		ref_ring_push(br, buf);
+
+		/* Track queued playback; SCO and MI2S clocks are not locked */
+		avail = snd_pcm_avail(br->play_spk);
+		if (avail >= 0 && (snd_pcm_uframes_t)avail <= play_buf) {
+			float fill = (float)(play_buf - (snd_pcm_uframes_t)avail);
+
+			fill_avg += (fill - fill_avg) / 16.0f;
+			if (adj == 0 && fill_avg < DRIFT_LO_SAMPLES)
+				adj = 1;
+			else if (adj == 0 && fill_avg > DRIFT_HI_SAMPLES)
+				adj = -1;
+			else if ((adj > 0 && fill_avg >= DRIFT_TARGET_SAMPLES) ||
+				 (adj < 0 && fill_avg <= DRIFT_TARGET_SAMPLES))
+				adj = 0;
+		}
 	}
 	return NULL;
 }
@@ -664,12 +766,10 @@ static void *uplink_worker(void *arg)
 	int16_t pri[HFP_FRAME_SAMPLES], ref_mic[HFP_FRAME_SAMPLES];
 	int16_t mic[HFP_FRAME_SAMPLES], ref[HFP_FRAME_SAMPLES];
 	int16_t proc[HFP_FRAME_SAMPLES];
-	int16_t silence[HFP_FRAME_SAMPLES] = { 0 };
 	unsigned int frames = 0;
 	int16_t mic_peak = 0, out_peak = 0;
 
-	pcm_xfer(br, br->play_sco, silence, HFP_FRAME_SAMPLES, 1, true, "ul_pre");
-	pcm_xfer(br, br->play_sco, silence, HFP_FRAME_SAMPLES, 1, true, "ul_pre");
+	pcm_write_silence(br, br->play_sco, 1, PLAY_PREFILL_SAMPLES);
 
 	while (!br->stop_req) {
 		struct alsa_bridge_cfg cfg;
@@ -817,6 +917,7 @@ int alsa_bridge_start(struct alsa_bridge *br)
 	br->nlms_pos = 0;
 	br->nlms_norm = 0.0f;
 	br->bg_ratio_sq = 49.0f; /* 7.0^2 */
+	br->xruns = 0;
 	br->stop_req = false;
 	br->running = true;
 
