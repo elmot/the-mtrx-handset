@@ -1,0 +1,15 @@
+# Skip loading remoteproc and audio modules in initramfs-extra (not bundled in modules-initfs).
+# Mapped only into initramfs via 01-nokia-argon-initfs.files so rootfs udevd is unaffected.
+SUBSYSTEM!="platform", GOTO="nokia_argon_initfs_end"
+ACTION=="remove", GOTO="nokia_argon_initfs_end"
+
+ENV{MODALIAS}=="of:N*Cqcom,*-mss-pil*", ENV{MODALIAS}=""
+ENV{MODALIAS}=="of:N*Cqcom,q6v5-pil*", ENV{MODALIAS}=""
+ENV{MODALIAS}=="of:N*Cqcom,pronto-v*-pil*", ENV{MODALIAS}=""
+ENV{MODALIAS}=="of:N*Cqcom,riva-pil*", ENV{MODALIAS}=""
+ENV{MODALIAS}=="of:N*Cqcom,msm8916-qdsp6-sndcard*", ENV{MODALIAS}=""
+ENV{MODALIAS}=="of:N*Cqcom,apq8016-sbc-sndcard*", ENV{MODALIAS}=""
+ENV{MODALIAS}=="of:N*Cqcom,apq8016-lpass-cpu*", ENV{MODALIAS}=""
+ENV{MODALIAS}=="of:N*Cqcom,lpass-cpu-apq8016*", ENV{MODALIAS}=""
+
+LABEL="nokia_argon_initfs_end"
