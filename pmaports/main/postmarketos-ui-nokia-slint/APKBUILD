@@ -1,27 +1,43 @@
 # Maintainer:
 pkgname=postmarketos-ui-nokia-slint
 pkgver=0.1.0
-pkgrel=4
+pkgrel=7
 pkgdesc="Minimal Python + Slint KMS/DRM UI for Nokia 8110 4G (OpenRC, no Wayland/X11/systemd)"
 url="https://postmarketos.org"
 arch="noarch"
 license="GPL-2.0-only"
 options="!check pmb:drm"
 depends="
+	bind-tools
 	bluez
+	curl
+	dnsmasq
 	font-dejavu
 	font-terminus
+	iproute2
+	iputils
+	iw
+	netcat-openbsd
 	nokia-bt-hfp
 	nokia-ui
-	dnsmasq
+	openssh-client
+	polkit
 	postmarketos-base-ui
 	postmarketos-base-ui-audio
 	postmarketos-base-ui-networkmanager
+	tcpdump
+	wget
 	"
 subpackages="$pkgname-openrc"
+source="
+	50-networkmanager.start
+	10-networkmanager-plugdev.rules
+	"
+builddir="$srcdir"
 
 package() {
-	mkdir -p "$pkgdir"
+	install -Dm644 "$builddir/10-networkmanager-plugdev.rules" \
+		"$pkgdir/etc/polkit-1/rules.d/10-networkmanager-plugdev.rules"
 }
 
 openrc() {
@@ -29,9 +45,15 @@ openrc() {
 	install_if="$pkgname=$pkgver-r$pkgrel openrc"
 	depends="
 		bluez-openrc
+		networkmanager-openrc
 		nokia-bt-hfp-openrc
 		nokia-ui-openrc
 		openrc
 	"
-	mkdir -p "$subpkgdir"
+	install -Dm755 "$builddir/50-networkmanager.start" \
+		"$subpkgdir/etc/local.d/50-networkmanager.start"
 }
+sha512sums="
+aec7ef13f6acc329fb9dce61601414ca29b29b7e09ae940816e2cc66eb2ec1eea272df43a9fe05a9897c4c95e16eb5c57308f580b1304751408ef8fb9d8d4bde  50-networkmanager.start
+e458f28ac9d1de8aa8bb7a51fac767d393f8640dc79045d97b185e618513131a29dfe2a558ac2e157e633054eec1f0ebc7805a99a3b780dd8d940052d4e9faf7  10-networkmanager-plugdev.rules
+"
