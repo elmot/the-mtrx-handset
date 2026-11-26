@@ -28,4 +28,16 @@ start_pre() {
 	chmod 700 "/run/user/$_hfp_uid"
 	export XDG_RUNTIME_DIR="/run/user/$_hfp_uid"
 	export HOME="${_hfp_home:-/root}"
+
+	if command -v bluetoothctl >/dev/null 2>&1; then
+		_bt_i=0
+		while [ "$_bt_i" -lt 5 ]; do
+			bluetoothctl power on >/dev/null 2>&1 && break
+			_bt_i=$((_bt_i + 1))
+			sleep 1
+		done
+		bluetoothctl system-alias "THE MTRX HANDSET" >/dev/null 2>&1 || true
+		bluetoothctl pairable off >/dev/null 2>&1 || true
+		bluetoothctl discoverable off >/dev/null 2>&1 || true
+	fi
 }

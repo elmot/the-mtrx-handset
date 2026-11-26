@@ -3,11 +3,12 @@ maintainer=""
 pkgname=device-nokia-argon
 pkgdesc="Nokia 8110 4G"
 pkgver=11
-pkgrel=9
+pkgrel=10
 url="https://postmarketos.org"
 license="GPL-2.0-only"
 arch="armv7"
 options="!check !archcheck"
+replaces="bluez"
 install="$pkgname.post-install $pkgname.post-upgrade"
 depends="
 	bluez
@@ -33,6 +34,7 @@ source="
 	60-nokia-argon-leds.rules
 	61-nokia-argon-keypad.hwdb
 	79-nokia-argon-initfs.rules
+	bluetooth-main.conf
 	deviceinfo
 	foot.ini
 	kernel-cmdline.conf
@@ -65,6 +67,8 @@ package() {
 			"$pkgdir"/usr/lib/udev/rules.d/60-nokia-argon-leds.rules
 	install -Dm644 "$srcdir"/61-nokia-argon-keypad.hwdb \
 			"$pkgdir"/usr/lib/udev/hwdb.d/61-nokia-argon-keypad.hwdb
+	install -Dm644 "$srcdir"/bluetooth-main.conf \
+			"$pkgdir"/etc/bluetooth/main.conf
 }
 
 foot() {

@@ -1,13 +1,13 @@
 # Maintainer:
 pkgname=nokia-ui
 pkgver=0.1.0
-pkgrel=12
+pkgrel=15
 pkgdesc="Minimal Python + Slint KMS/DRM UI for Nokia 8110 4G"
 url="https://postmarketos.org"
 arch="noarch"
 license="GPL-2.0-only"
 options="!check"
-depends="dbus font-dejavu font-terminus py3-slint"
+depends="dbus font-dejavu font-terminus py3-dbus py3-gobject3 py3-slint"
 subpackages="$pkgname-openrc"
 install="$pkgname-openrc.post-install"
 source="
@@ -45,7 +45,7 @@ openrc() {
 		"$subpkgdir/etc/runlevels/default/nokia-ui"
 }
 sha512sums="
-cad49ff3c42ee73b1f3f3a0a88951b092987bae27bdddf433de7bede88302d3c72861094fb2d3193928298bf29ea4a38572030011282fdf0e631eea4101187aa  main.py
+819a4c2eb023aec4590bc323afe95a5684818ddcf251382dfacab0daeec8d1f770a2c4a6b428fcec9ff7314cfc61e730c8fc2514a5975770f51c9b75d738f8d7  main.py
 d3c9dc7d94fca745794a8e8f3da05ef6c2f279f276266411f6b76b63d58b4c74181936571b057640cb93670705d65bb8420f20126898cf1c73f79e5b38cf361e  main.slint
 d1bc73229db304d3340b181f9974452652abe5cc0008cc79eb4defc78da7b2f48fc4d6c393350948e21788395e4027aa9f00c494083a09c3cd1fe5956cf704d8  main_view.slint
 6784bf68d7a4f99ad84dd232eec0957b9708654ae03fb2936684ad60d41e1b779a07df6770f0768fa71b8063f383b62517e73553aff05248ee06cc40d730efcd  ui_common.slint

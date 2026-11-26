@@ -16,19 +16,24 @@ import socket
 import struct
 import subprocess
 import threading
+import dbus
+import dbus.mainloop.glib
+import dbus.service
+from gi.repository import GLib
 import slint
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_BT_NAME = "THE MTRX HANDSET"
+BLUEZ_AGENT_PATH = "/org/nokia/BtAgent"
 INACTIVITY_TIMEOUT_SEC = 20
-PAIRING_TIMEOUT_SEC = 120
 CALL_ENDED_HOLD_MS = 1500
 PAIRING_BANNER_MS = 3000
 RING_VIBRATE_INTERVAL_MS = 2000
 
 BACKLIGHT_BRIGHTNESS_PATH = "/sys/class/backlight/backlight/brightness"
 BACKLIGHT_MAX_PATH = "/sys/class/backlight/backlight/max_brightness"
+KBD_LED_PATH = "/sys/class/leds/white:kbd_backlight/brightness"
 DEFAULT_BACKLIGHT_LEVEL = 14
 VIBRATOR_BY_PATH = (
     "/dev/input/by-path/"
@@ -368,11 +373,325 @@ class EvdevInputReader:
 _DBUS_SIGNAL_SPECS: dict[str, tuple[str, ...]] = {
     "CallState": ("bool", "str", "str"),
     "AudioState": ("str", "int", "int", "bool"),
-    "SliderState": ("bool",),
-    "BondState": ("bool", "str", "str", "bool"),
-    "PairingSuccess": ("str", "str"),
 }
 _MEMBER_RE = re.compile(r"member=([A-Za-z0-9_]+)")
+
+
+def set_kbd_backlight(on: bool) -> None:
+    try:
+        with open(KBD_LED_PATH, "w", encoding="utf-8") as f:
+            f.write("1\n" if on else "0\n")
+    except OSError:
+        pass
+
+
+class BluezAgent(dbus.service.Object):
+    """Auto-accepting NoInputNoOutput BlueZ pairing/authorization agent."""
+
+    def __init__(self, bus: dbus.SystemBus, path: str) -> None:
+        super().__init__(bus, path)
+        self._bus = bus
+
+    def _trust_device(self, device_path: str) -> None:
+        if not device_path:
+            return
+        try:
+            proxy = self._bus.get_object("org.bluez", device_path)
+            props = dbus.Interface(proxy, "org.freedesktop.DBus.Properties")
+            props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True))
+        except dbus.exceptions.DBusException:
+            pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Release(self) -> None:
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
+    def Cancel(self) -> None:
+        pass
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+    def AuthorizeService(self, device: str, uuid: str) -> None:
+        self._trust_device(str(device))
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device: str, passkey: int) -> None:
+        self._trust_device(str(device))
+
+    @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="")
+    def RequestAuthorization(self, device: str) -> None:
+        self._trust_device(str(device))
+
+
+class BluezManager:
+    """Hosts org.bluez.Agent1 and manages Adapter1/Device1 pairing on system D-Bus."""
+
+    def __init__(self, out_queue: queue.SimpleQueue[tuple[str, object]]) -> None:
+        self.out_queue = out_queue
+        self.bus: dbus.SystemBus | None = None
+        self.loop: GLib.MainLoop | None = None
+        self.agent: BluezAgent | None = None
+        self.local_name: str = DEFAULT_BT_NAME
+        self.bonded: bool = False
+        self.bonded_path: str = ""
+        self.bonded_name: str = ""
+        self.bonded_addr: str = ""
+        self.pairing_active: bool = False
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        dbus.mainloop.glib.threads_init()
+        self.bus = dbus.SystemBus()
+        self.loop = GLib.MainLoop()
+        self.agent = BluezAgent(self.bus, BLUEZ_AGENT_PATH)
+
+        self.bus.add_signal_receiver(
+            self._on_properties_changed,
+            signal_name="PropertiesChanged",
+            dbus_interface="org.freedesktop.DBus.Properties",
+            bus_name="org.bluez",
+            path_keyword="path",
+        )
+        self.bus.add_signal_receiver(
+            self._on_interfaces_removed,
+            signal_name="InterfacesRemoved",
+            dbus_interface="org.freedesktop.DBus.ObjectManager",
+            bus_name="org.bluez",
+        )
+        self.bus.add_signal_receiver(
+            self._on_name_owner_changed,
+            signal_name="NameOwnerChanged",
+            dbus_interface="org.freedesktop.DBus",
+            arg0="org.bluez",
+        )
+
+        self._register_agent()
+        self._scan_devices()
+        self.loop.run()
+
+    def _emit_bond_state(self) -> None:
+        self.out_queue.put(
+            (
+                "BluezBondState",
+                (
+                    self.bonded,
+                    self.bonded_name,
+                    self.bonded_addr,
+                    self.pairing_active,
+                    self.local_name,
+                ),
+            )
+        )
+
+    def _register_agent(self) -> None:
+        if self.bus is None:
+            return
+        try:
+            obj = self.bus.get_object("org.bluez", "/org/bluez")
+            mgr = dbus.Interface(obj, "org.bluez.AgentManager1")
+            mgr.RegisterAgent(BLUEZ_AGENT_PATH, "NoInputNoOutput")
+            mgr.RequestDefaultAgent(BLUEZ_AGENT_PATH)
+        except dbus.exceptions.DBusException:
+            pass
+
+    def _set_adapter_prop(self, prop: str, val: object) -> bool:
+        if self.bus is None:
+            return False
+        try:
+            obj = self.bus.get_object("org.bluez", "/org/bluez/hci0")
+            props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+            props.Set("org.bluez.Adapter1", prop, val)
+            return True
+        except dbus.exceptions.DBusException:
+            return False
+
+    def _trust_device(self, dev_path: str) -> None:
+        if self.bus is None or not dev_path:
+            return
+        try:
+            obj = self.bus.get_object("org.bluez", dev_path)
+            props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+            props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True))
+        except dbus.exceptions.DBusException:
+            pass
+
+    @staticmethod
+    def _mac_from_path(dev_path: str) -> str:
+        idx = dev_path.find("dev_")
+        if idx < 0:
+            return ""
+        return dev_path[idx + 4 :].replace("_", ":")
+
+    def _fetch_device_info(self, dev_path: str) -> tuple[str, str]:
+        addr = self._mac_from_path(dev_path)
+        name = ""
+        if self.bus is not None:
+            try:
+                obj = self.bus.get_object("org.bluez", dev_path)
+                props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+                d = props.GetAll("org.bluez.Device1")
+                if "Address" in d and str(d["Address"]):
+                    addr = str(d["Address"])
+                if "Alias" in d and str(d["Alias"]):
+                    name = str(d["Alias"])
+                elif "Name" in d and str(d["Name"]):
+                    name = str(d["Name"])
+            except dbus.exceptions.DBusException:
+                pass
+        return (name or addr, addr)
+
+    def _scan_devices(self) -> None:
+        if self.bus is None:
+            return
+        try:
+            obj = self.bus.get_object("org.bluez", "/")
+            om = dbus.Interface(obj, "org.freedesktop.DBus.ObjectManager")
+            managed = om.GetManagedObjects()
+        except dbus.exceptions.DBusException:
+            return
+
+        found_bonded = False
+        found_path = ""
+        found_name = ""
+        found_addr = ""
+
+        for path, ifaces in managed.items():
+            p = str(path)
+            if p == "/org/bluez/hci0":
+                aprops = ifaces.get("org.bluez.Adapter1")
+                if aprops:
+                    if "Alias" in aprops and str(aprops["Alias"]):
+                        self.local_name = str(aprops["Alias"])
+                    if "Discoverable" in aprops:
+                        self.pairing_active = bool(aprops["Discoverable"])
+            elif "/org/bluez/hci0/dev_" in p:
+                dprops = ifaces.get("org.bluez.Device1")
+                if dprops and bool(dprops.get("Paired", False)):
+                    if not bool(dprops.get("Trusted", False)):
+                        self._trust_device(p)
+                    if not found_bonded:
+                        found_bonded = True
+                        found_path = p
+                        found_addr = str(dprops.get("Address", "")) or self._mac_from_path(p)
+                        found_name = (
+                            str(dprops.get("Alias", ""))
+                            or str(dprops.get("Name", ""))
+                            or found_addr
+                        )
+
+        self.bonded = found_bonded
+        self.bonded_path = found_path
+        self.bonded_name = found_name
+        self.bonded_addr = found_addr
+        self._emit_bond_state()
+
+    def _on_name_owner_changed(self, _name: str, _old: str, new_owner: str) -> None:
+        if new_owner:
+            self._register_agent()
+            self._scan_devices()
+        else:
+            self.pairing_active = False
+            self._emit_bond_state()
+
+    def _on_properties_changed(
+        self, iface: str, changed: dict, _invalidated: list, path: str = ""
+    ) -> None:
+        if iface == "org.bluez.Adapter1" and path == "/org/bluez/hci0":
+            notify = False
+            if "Discoverable" in changed:
+                disc = bool(changed["Discoverable"])
+                self.pairing_active = disc
+                if not disc:
+                    self._set_adapter_prop("Pairable", dbus.Boolean(False))
+                notify = True
+            if "Alias" in changed and str(changed["Alias"]):
+                self.local_name = str(changed["Alias"])
+                notify = True
+            if notify:
+                self._emit_bond_state()
+        elif iface == "org.bluez.Device1" and "/org/bluez/hci0/dev_" in path:
+            if "Paired" in changed:
+                if bool(changed["Paired"]):
+                    self._trust_device(path)
+                    dev_name, dev_addr = self._fetch_device_info(path)
+                    self.bonded = True
+                    self.bonded_path = path
+                    self.bonded_name = dev_name
+                    self.bonded_addr = dev_addr
+                    self._do_stop_pairing()
+                    self.out_queue.put(("BluezPairingSuccess", (dev_name, dev_addr)))
+                    self._emit_bond_state()
+                else:
+                    self._scan_devices()
+            elif self.bonded and path == self.bonded_path:
+                if "Alias" in changed and str(changed["Alias"]):
+                    self.bonded_name = str(changed["Alias"])
+                    self._emit_bond_state()
+                elif "Name" in changed and str(changed["Name"]):
+                    self.bonded_name = str(changed["Name"])
+                    self._emit_bond_state()
+
+    def _on_interfaces_removed(self, obj_path: str, _ifaces: list) -> None:
+        if "/org/bluez/hci0/dev_" in str(obj_path):
+            self._scan_devices()
+
+    def _do_start_pairing(self) -> bool:
+        ok = (
+            self._set_adapter_prop("Pairable", dbus.Boolean(True))
+            and self._set_adapter_prop("Discoverable", dbus.Boolean(True))
+        )
+        if ok:
+            self.pairing_active = True
+            self._emit_bond_state()
+        else:
+            self.pairing_active = False
+            self.out_queue.put(("BluezPairFailed", None))
+        return False
+
+    def _do_stop_pairing(self) -> bool:
+        self._set_adapter_prop("Discoverable", dbus.Boolean(False))
+        self._set_adapter_prop("Pairable", dbus.Boolean(False))
+        self.pairing_active = False
+        self._emit_bond_state()
+        return False
+
+    def _do_unpair_all(self) -> bool:
+        if self.bus is None:
+            return False
+        try:
+            obj = self.bus.get_object("org.bluez", "/")
+            om = dbus.Interface(obj, "org.freedesktop.DBus.ObjectManager")
+            managed = om.GetManagedObjects()
+            adapter = dbus.Interface(
+                self.bus.get_object("org.bluez", "/org/bluez/hci0"),
+                "org.bluez.Adapter1",
+            )
+            for path in list(managed.keys()):
+                if "/org/bluez/hci0/dev_" in str(path):
+                    try:
+                        adapter.RemoveDevice(path)
+                    except dbus.exceptions.DBusException:
+                        pass
+        except dbus.exceptions.DBusException:
+            pass
+        self.bonded = False
+        self.bonded_path = ""
+        self.bonded_name = ""
+        self.bonded_addr = ""
+        self._emit_bond_state()
+        return False
+
+    def start_pairing(self) -> None:
+        GLib.idle_add(self._do_start_pairing)
+
+    def stop_pairing(self) -> None:
+        GLib.idle_add(self._do_stop_pairing)
+
+    def unpair_all(self) -> None:
+        GLib.idle_add(self._do_unpair_all)
 
 
 class DbusMonitorParser:
@@ -440,11 +759,12 @@ class NokiaUi:
         self.backlight = DisplayBacklight()
         self.ringer = VibratorRinger()
         self.evdev = EvdevInputReader(self.ev_queue)
+        self.bluez = BluezManager(self.ev_queue)
         self._init_sync_done = False
         self._init_sync_attempts = 0
+        self._awaiting_pairing_active = False
 
         self.call_ended_timer = slint.Timer()
-        self.pairing_timer = slint.Timer()
         self.inactivity_timer = slint.Timer()
         self.ring_timer = slint.Timer()
         self.banner_timer = slint.Timer()
@@ -484,8 +804,16 @@ class NokiaUi:
         if not self._is_screen("active_call") and not self._is_screen("incoming_call"):
             self.set_screen("sleep")
 
+    def _is_active_pairing(self) -> bool:
+        return self._is_screen("pairing") and not self.win.pairing_timed_out
+
     def _schedule_inactivity_sleep(self) -> None:
-        if self.win.slider_open or self._is_screen("incoming_call") or self._is_screen("active_call"):
+        if (
+            self.win.slider_open
+            or self._is_screen("incoming_call")
+            or self._is_screen("active_call")
+            or self._is_active_pairing()
+        ):
             self.inactivity_timer.stop()
             return
         self.inactivity_timer.start(
@@ -495,7 +823,12 @@ class NokiaUi:
         )
 
     def _on_screen_inactivity_timeout(self) -> None:
-        if not self.win.slider_open and not self._is_screen("incoming_call") and not self._is_screen("active_call"):
+        if (
+            not self.win.slider_open
+            and not self._is_screen("incoming_call")
+            and not self._is_screen("active_call")
+            and not self._is_active_pairing()
+        ):
             self._sleep_display()
 
     def _start_ringer(self) -> None:
@@ -550,21 +883,14 @@ class NokiaUi:
     def _start_pairing(self) -> None:
         self.win.pairing_timed_out = False
         self.set_screen("pairing")
-        send_hfp_cmd("pair-start")
-        self.pairing_timer.start(
-            slint.TimerMode.SingleShot,
-            timedelta(seconds=PAIRING_TIMEOUT_SEC),
-            self._on_pairing_timeout,
-        )
+        self._awaiting_pairing_active = True
+        self.inactivity_timer.stop()
+        self.bluez.start_pairing()
 
     def _stop_pairing(self) -> None:
-        self.pairing_timer.stop()
-        send_hfp_cmd("pair-stop")
-
-    def _on_pairing_timeout(self) -> None:
-        if self._is_screen("pairing"):
-            send_hfp_cmd("pair-stop")
-            self.win.pairing_timed_out = True
+        self._awaiting_pairing_active = False
+        self.bluez.stop_pairing()
+        self._schedule_inactivity_sleep()
 
     def _on_user_activity(self) -> bool:
         """Wake display if asleep; returns True if the key was consumed solely to wake."""
@@ -610,7 +936,7 @@ class NokiaUi:
             send_hfp_cmd("hangup")
             self._enter_call_ended()
         elif self._is_screen("unpair"):
-            send_hfp_cmd("unpair")
+            self.bluez.unpair_all()
             self.win.paired_device_name = ""
             self.win.bt_connected = False
             self._start_pairing()
@@ -667,10 +993,17 @@ class NokiaUi:
 
     def on_slider_changed(self, is_open: bool) -> None:
         self.win.slider_open = is_open
+        set_kbd_backlight(is_open)
         if is_open:
             self.inactivity_timer.stop()
             self._wake_display()
+            if self._is_screen("incoming_call"):
+                self._stop_ringer()
+                send_hfp_cmd("answer")
         else:
+            if self._is_screen("active_call"):
+                send_hfp_cmd("hangup")
+                self._enter_call_ended()
             self._schedule_inactivity_sleep()
 
     def adjust_volume(self, delta: int) -> None:
@@ -703,8 +1036,6 @@ class NokiaUi:
         call = kv.get("call") == "1"
         callsetup = kv.get("callsetup", "0")
         caller = kv.get("caller", "-")
-        if "slider" in kv and self.evdev.initial_slider_open is None:
-            self.win.slider_open = kv["slider"] == "1"
         vgs = 12
         if "vgs" in kv:
             try:
@@ -712,28 +1043,6 @@ class NokiaUi:
             except ValueError:
                 pass
         self._apply_audio_state(kv.get("output", "earpiece"), vgs)
-
-        bt_info = send_hfp_cmd("bt-info")
-        if bt_info:
-            bkv: dict[str, str] = {}
-            for line in bt_info.splitlines():
-                if "=" in line:
-                    k, v = line.split("=", 1)
-                    bkv[k.strip()] = v.strip()
-            if bkv.get("local_name"):
-                self.win.local_bt_name = bkv["local_name"]
-            if bkv.get("bonded") == "1":
-                self.win.paired_device_name = (
-                    bkv.get("device_name") or bkv.get("device_addr") or ""
-                )
-            else:
-                self.win.paired_device_name = ""
-            if "slider" in bkv and self.evdev.initial_slider_open is None:
-                self.win.slider_open = bkv["slider"] == "1"
-        else:
-            peer = kv.get("peer", "-")
-            if peer and peer != "-":
-                self.win.paired_device_name = peer
 
         state = "active" if call else ("incoming" if callsetup == "1" else "idle")
         self.ev_queue.put(("CallState", (connected, state, "" if caller == "-" else caller)))
@@ -771,6 +1080,8 @@ class NokiaUi:
         self.win.bt_connected = connected
         self.win.caller_id = caller
         if state == "incoming":
+            if self._is_screen("pairing"):
+                self._stop_pairing()
             was_incoming = self._is_screen("incoming_call")
             self.inactivity_timer.stop()
             self._wake_display()
@@ -779,6 +1090,8 @@ class NokiaUi:
                 self.set_screen("incoming_call")
                 self._start_ringer()
         elif state == "active":
+            if self._is_screen("pairing"):
+                self._stop_pairing()
             self._stop_ringer()
             self.inactivity_timer.stop()
             self._wake_display()
@@ -790,6 +1103,38 @@ class NokiaUi:
             elif self._is_screen("incoming_call"):
                 self.set_screen("home")
                 self._schedule_inactivity_sleep()
+
+    def _handle_bond_state(
+        self, bonded: bool, dev_name: str, dev_addr: str, pairing_active: bool
+    ) -> None:
+        if bonded:
+            self.win.paired_device_name = dev_name or dev_addr
+            if self._is_screen("pairing"):
+                self._awaiting_pairing_active = False
+                self.win.pairing_timed_out = False
+                self.set_screen("home")
+                self._schedule_inactivity_sleep()
+        else:
+            self.win.paired_device_name = ""
+            self.win.bt_connected = False
+            if self._is_screen("unpair") and not pairing_active:
+                self.set_screen("home")
+                self._schedule_inactivity_sleep()
+
+        if pairing_active:
+            self._awaiting_pairing_active = False
+            self.win.pairing_timed_out = False
+            if not self._is_screen("pairing"):
+                self.set_screen("pairing")
+            self._wake_display()
+            self.inactivity_timer.stop()
+        elif (
+            self._is_screen("pairing")
+            and not bonded
+            and not self._awaiting_pairing_active
+        ):
+            self.win.pairing_timed_out = True
+            self._schedule_inactivity_sleep()
 
     def _drain_events(self) -> None:
         while not self.ev_queue.empty():
@@ -810,32 +1155,37 @@ class NokiaUi:
             elif kind == "slider":
                 is_open = payload[0] if isinstance(payload, tuple) else bool(payload)
                 self.on_slider_changed(bool(is_open))
-            elif kind == "SliderState":
-                (is_open,) = payload  # type: ignore[misc]
-                self.on_slider_changed(bool(is_open))
             elif kind == "CallState":
                 connected, state, caller = payload  # type: ignore[misc]
                 self._handle_call_state(bool(connected), str(state), str(caller))
             elif kind == "AudioState":
                 output, vgs, _vgm, _muted = payload  # type: ignore[misc]
                 self._apply_audio_state(str(output), int(vgs))
-            elif kind == "BondState":
-                bonded, dev_name, dev_addr, _pairing = payload  # type: ignore[misc]
-                if bonded:
-                    self.win.paired_device_name = str(dev_name) or str(dev_addr)
-                else:
-                    self.win.paired_device_name = ""
-                    self.win.bt_connected = False
-            elif kind == "PairingSuccess":
+            elif kind == "BluezBondState":
+                bonded, dev_name, dev_addr, pairing_active, local_name = payload  # type: ignore[misc]
+                if local_name:
+                    self.win.local_bt_name = str(local_name)
+                self._handle_bond_state(
+                    bool(bonded),
+                    str(dev_name),
+                    str(dev_addr),
+                    bool(pairing_active),
+                )
+            elif kind == "BluezPairingSuccess":
                 dev_name, dev_addr = payload  # type: ignore[misc]
                 label = str(dev_name) or str(dev_addr)
-                self.pairing_timer.stop()
+                self._awaiting_pairing_active = False
                 self.win.pairing_timed_out = False
                 self.win.paired_device_name = label
                 self._wake_display()
                 self.set_screen("home")
                 self._flash_banner(f"PAIRED: {label}")
                 self._schedule_inactivity_sleep()
+            elif kind == "BluezPairFailed":
+                self._awaiting_pairing_active = False
+                if self._is_screen("pairing"):
+                    self.win.pairing_timed_out = True
+                    self._schedule_inactivity_sleep()
 
     def _refresh_battery(self) -> None:
         pct = read_battery_percent()
@@ -849,6 +1199,7 @@ class NokiaUi:
             self.win.use_slint_keys = False
             if self.evdev.initial_slider_open is not None:
                 self.win.slider_open = self.evdev.initial_slider_open
+        set_kbd_backlight(bool(self.win.slider_open))
         if not self.read_initial_status():
             self.init_sync_timer.start(
                 slint.TimerMode.Repeated,
@@ -856,6 +1207,7 @@ class NokiaUi:
                 self._retry_initial_status,
             )
         self._schedule_inactivity_sleep()
+        self.bluez.start()
         threading.Thread(target=self._dbus_listener, daemon=True).start()
         self.poll_timer.start(
             slint.TimerMode.Repeated, timedelta(milliseconds=50), self._drain_events
