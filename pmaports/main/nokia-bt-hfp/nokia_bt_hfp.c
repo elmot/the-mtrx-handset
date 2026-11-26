@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "alsa_bridge.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <gio/gio.h>
@@ -34,6 +35,15 @@ struct bt_sockaddr_sco {
 
 #define HFP_HF_UUID "0000111e-0000-1000-8000-00805f9b34fb"
 #define PROFILE_OBJ_PATH "/org/nokia/BtHfpProfile"
+#define GATT_APP_PATH "/org/nokia/BtHfpGatt"
+#define GATT_SVC_PATH "/org/nokia/BtHfpGatt/service0"
+#define GATT_CHAR_LEVEL_PATH "/org/nokia/BtHfpGatt/service0/char0"
+#define GATT_CHAR_POWER_PATH "/org/nokia/BtHfpGatt/service0/char1"
+#define GATT_CHAR_STATUS_PATH "/org/nokia/BtHfpGatt/service0/char2"
+#define GATT_BAS_UUID "0000180f-0000-1000-8000-00805f9b34fb"
+#define GATT_CHAR_LEVEL_UUID "00002a19-0000-1000-8000-00805f9b34fb"
+#define GATT_CHAR_POWER_UUID "00002a1a-0000-1000-8000-00805f9b34fb"
+#define GATT_CHAR_STATUS_UUID "00002bed-0000-1000-8000-00805f9b34fb"
 #define LOCAL_BT_ALIAS "THE MTRX HANDSET"
 #define AT_QUEUE_SIZE 24
 
@@ -78,6 +88,39 @@ static const char profile_xml[] =
 	"      <arg type='o' name='device' direction='in'/>"
 	"    </method>"
 	"    <method name='Cancel'/>"
+	"  </interface>"
+	"</node>";
+
+static const char gatt_om_xml[] =
+	"<node>"
+	"  <interface name='org.freedesktop.DBus.ObjectManager'>"
+	"    <method name='GetManagedObjects'>"
+	"      <arg type='a{oa{sa{sv}}}' name='objects' direction='out'/>"
+	"    </method>"
+	"  </interface>"
+	"</node>";
+
+static const char gatt_svc_xml[] =
+	"<node>"
+	"  <interface name='org.bluez.GattService1'>"
+	"    <property name='UUID' type='s' access='read'/>"
+	"    <property name='Primary' type='b' access='read'/>"
+	"  </interface>"
+	"</node>";
+
+static const char gatt_char_xml[] =
+	"<node>"
+	"  <interface name='org.bluez.GattCharacteristic1'>"
+	"    <method name='ReadValue'>"
+	"      <arg type='a{sv}' name='options' direction='in'/>"
+	"      <arg type='ay' name='value' direction='out'/>"
+	"    </method>"
+	"    <method name='StartNotify'/>"
+	"    <method name='StopNotify'/>"
+	"    <property name='UUID' type='s' access='read'/>"
+	"    <property name='Service' type='o' access='read'/>"
+	"    <property name='Flags' type='as' access='read'/>"
+	"    <property name='Value' type='ay' access='read'/>"
 	"  </interface>"
 	"</node>";
 
@@ -145,9 +188,246 @@ struct hfp_app {
 	int slide_fd;
 	guint slide_watch_id;
 	bool slider_open;
+
+	bool ag_hf_ind_battery_enabled;
+	bool ag_xapl_supported;
+	int bat_percent;
+	bool bat_present;
+	bool bat_charging;
+	bool bat_discharging;
+	bool bat_full;
+	bool ext_power;
+	guint bat_timer_id;
+
+	guint gatt_om_reg_id;
+	guint gatt_svc_reg_id;
+	guint gatt_char_reg_id[3];
+	bool gatt_notify[3];
+	bool gatt_registered;
 };
 
 static void pump_at_queue(struct hfp_app *app);
+static void queue_at(struct hfp_app *app, const char *cmd);
+
+static bool read_sysfs_str(const char *path, char *out, size_t sz)
+{
+	FILE *f = fopen(path, "r");
+	size_t n;
+
+	if (!f)
+		return false;
+	if (!fgets(out, (int)sz, f)) {
+		fclose(f);
+		return false;
+	}
+	fclose(f);
+	n = strlen(out);
+	while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' || out[n - 1] == ' '))
+		out[--n] = '\0';
+	return n > 0;
+}
+
+static bool read_power_supply(struct hfp_app *app, bool *changed)
+{
+	DIR *dir = opendir("/sys/class/power_supply");
+	struct dirent *de;
+	int new_pct = -1;
+	bool new_present = false;
+	bool new_charging = false;
+	bool new_discharging = false;
+	bool new_full = false;
+	bool new_ext = false;
+
+	if (changed)
+		*changed = false;
+	if (!dir)
+		return false;
+
+	while ((de = readdir(dir)) != NULL) {
+		char path[320];
+		char type_buf[64] = { 0 };
+		char buf[64] = { 0 };
+
+		if (de->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), "/sys/class/power_supply/%s/type",
+			 de->d_name);
+		read_sysfs_str(path, type_buf, sizeof(type_buf));
+
+		if (type_buf[0] && strcmp(type_buf, "Battery") != 0) {
+			snprintf(path, sizeof(path),
+				 "/sys/class/power_supply/%s/online", de->d_name);
+			if (read_sysfs_str(path, buf, sizeof(buf)) && atoi(buf) == 1)
+				new_ext = true;
+			continue;
+		}
+
+		snprintf(path, sizeof(path), "/sys/class/power_supply/%s/capacity",
+			 de->d_name);
+		if (new_pct < 0 && read_sysfs_str(path, buf, sizeof(buf))) {
+			char *end = NULL;
+			long v = strtol(buf, &end, 10);
+			if (end != buf) {
+				if (v < 0)
+					v = 0;
+				if (v > 100)
+					v = 100;
+				new_pct = (int)v;
+				new_present = true;
+
+				snprintf(path, sizeof(path),
+					 "/sys/class/power_supply/%s/status",
+					 de->d_name);
+				if (read_sysfs_str(path, buf, sizeof(buf))) {
+					if (strcmp(buf, "Charging") == 0) {
+						new_charging = true;
+						new_ext = true;
+					} else if (strcmp(buf, "Full") == 0) {
+						new_full = true;
+						new_ext = true;
+					} else if (strcmp(buf, "Discharging") == 0) {
+						new_discharging = true;
+					}
+				}
+			}
+		}
+	}
+	closedir(dir);
+
+	if (new_pct < 0)
+		return false;
+
+	if (new_pct != app->bat_percent || new_present != app->bat_present ||
+	    new_charging != app->bat_charging ||
+	    new_discharging != app->bat_discharging ||
+	    new_full != app->bat_full || new_ext != app->ext_power) {
+		app->bat_percent = new_pct;
+		app->bat_present = new_present;
+		app->bat_charging = new_charging;
+		app->bat_discharging = new_discharging;
+		app->bat_full = new_full;
+		app->ext_power = new_ext;
+		if (changed)
+			*changed = true;
+	}
+	return true;
+}
+
+static size_t build_gatt_char_value(const struct hfp_app *app, int idx,
+				    uint8_t *buf, size_t max_sz)
+{
+	uint8_t pct = (app->bat_percent >= 0) ? (uint8_t)app->bat_percent : 0;
+
+	if (idx == 0 && max_sz >= 1) {
+		/* 0x2A19 Battery Level: uint8 0..100 */
+		buf[0] = pct;
+		return 1;
+	}
+	if (idx == 1 && max_sz >= 1) {
+		/* 0x2A1A Battery Power State: 2 bits per field */
+		uint8_t present = app->bat_present ? 3 : 2;
+		uint8_t disch = app->bat_discharging ? 3 : 2;
+		uint8_t chg = app->bat_charging ? 3 : 2;
+		uint8_t lvl = (app->bat_present && pct <= 15) ? 3 : 2;
+		buf[0] = (uint8_t)(present | (disch << 2) | (chg << 4) | (lvl << 6));
+		return 1;
+	}
+	if (idx == 2 && max_sz >= 4) {
+		/* 0x2BED Battery Level Status: Flags(1) + PowerState(2) + Level(1) */
+		uint16_t ps = 0;
+		uint16_t wired = app->ext_power ? 1 : 0;
+		uint16_t chg_state = app->bat_charging ? 1 :
+				     (app->bat_discharging ? 2 : 3);
+		uint16_t chg_lvl = (pct <= 10) ? 3 : ((pct <= 20) ? 2 : 1);
+
+		if (app->bat_present)
+			ps |= (1U << 0);
+		ps |= (wired << 1);
+		ps |= (chg_state << 5);
+		ps |= (chg_lvl << 7);
+
+		buf[0] = 0x02; /* Battery Level Present */
+		buf[1] = (uint8_t)(ps & 0xff);
+		buf[2] = (uint8_t)((ps >> 8) & 0xff);
+		buf[3] = pct;
+		return 4;
+	}
+	return 0;
+}
+
+static void emit_gatt_battery_notifications(struct hfp_app *app)
+{
+	static const char *const paths[3] = {
+		GATT_CHAR_LEVEL_PATH,
+		GATT_CHAR_POWER_PATH,
+		GATT_CHAR_STATUS_PATH,
+	};
+
+	if (!app->sys_bus)
+		return;
+	for (int i = 0; i < 3; i++) {
+		uint8_t val[4];
+		size_t len;
+		GVariantBuilder changed_props;
+		GVariantBuilder inv_props;
+
+		if (!app->gatt_notify[i])
+			continue;
+		len = build_gatt_char_value(app, i, val, sizeof(val));
+		if (len == 0)
+			continue;
+
+		g_variant_builder_init(&changed_props, G_VARIANT_TYPE("a{sv}"));
+		g_variant_builder_add(
+			&changed_props, "{sv}", "Value",
+			g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, val, len, 1));
+		g_variant_builder_init(&inv_props, G_VARIANT_TYPE("as"));
+
+		g_dbus_connection_emit_signal(
+			app->sys_bus, NULL, paths[i],
+			"org.freedesktop.DBus.Properties", "PropertiesChanged",
+			g_variant_new("(s@a{sv}@as)",
+				      "org.bluez.GattCharacteristic1",
+				      g_variant_builder_end(&changed_props),
+				      g_variant_builder_end(&inv_props)),
+			NULL);
+	}
+}
+
+static void send_hfp_battery(struct hfp_app *app)
+{
+	char at[48];
+
+	if (app->rfcomm_fd < 0 || !app->slc_ready || app->bat_percent < 0)
+		return;
+	if (app->ag_hf_ind_battery_enabled) {
+		snprintf(at, sizeof(at), "AT+BIEV=2,%d", app->bat_percent);
+		queue_at(app, at);
+	}
+	if (app->ag_xapl_supported) {
+		int lvl9 = (app->bat_percent * 9 + 50) / 100;
+		int dock = (app->bat_charging || app->ext_power) ? 1 : 0;
+		if (lvl9 > 9)
+			lvl9 = 9;
+		snprintf(at, sizeof(at), "AT+IPHONEACCEV=2,1,%d,2,%d", lvl9, dock);
+		queue_at(app, at);
+	}
+}
+
+static gboolean on_battery_poll(gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	bool changed = false;
+
+	if (read_power_supply(app, &changed) && changed) {
+		LOG("[bat] level=%d%% charging=%d discharging=%d full=%d ext=%d",
+		    app->bat_percent, app->bat_charging, app->bat_discharging,
+		    app->bat_full, app->ext_power);
+		send_hfp_battery(app);
+		emit_gatt_battery_notifications(app);
+	}
+	return G_SOURCE_CONTINUE;
+}
 
 static int lookup_name(const char *const *tbl, size_t n, const char *s)
 {
@@ -377,8 +657,25 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 
 	if (strncmp(line, "+BRSF:", 6) == 0) {
 		app->ag_features = (unsigned int)strtoul(line + 6, NULL, 10);
-		LOG("[hfp] AG features=0x%x (codec_neg=%d)", app->ag_features,
-		    (app->ag_features & (1U << 9)) ? 1 : 0);
+		LOG("[hfp] AG features=0x%x (codec_neg=%d hf_ind=%d)",
+		    app->ag_features,
+		    (app->ag_features & (1U << 9)) ? 1 : 0,
+		    (app->ag_features & (1U << 10)) ? 1 : 0);
+	} else if (strncmp(line, "+BIND:", 6) == 0) {
+		int ind = 0, state = 0;
+		if (sscanf(line + 6, " %d , %d", &ind, &state) == 2 && ind == 2) {
+			app->ag_hf_ind_battery_enabled = (state == 1);
+			LOG("[hfp] HF indicator battery %s",
+			    app->ag_hf_ind_battery_enabled ? "enabled" : "disabled");
+			if (app->ag_hf_ind_battery_enabled && app->slc_ready &&
+			    app->bat_percent >= 0) {
+				char at[32];
+				snprintf(at, sizeof(at), "AT+BIEV=2,%d", app->bat_percent);
+				queue_at(app, at);
+			}
+		}
+	} else if (strncmp(line, "+XAPL=", 6) == 0) {
+		app->ag_xapl_supported = true;
 	} else if (strncmp(line, "+CIND:", 6) == 0) {
 		const char *rest = line + 6;
 		while (*rest == ' ')
@@ -449,6 +746,11 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 				queue_at(app, "AT+CMER=3,0,0,1");
 				if (app->ag_features & (1U << 0))
 					queue_at(app, "AT+CHLD=?");
+				if (app->ag_features & (1U << 10)) {
+					queue_at(app, "AT+BIND=2");
+					queue_at(app, "AT+BIND=?");
+					queue_at(app, "AT+BIND?");
+				}
 				queue_at(app, "AT+CLIP=1");
 				queue_at(app, "AT+CMEE=1");
 				snprintf(at, sizeof(at), "AT+VGS=%d", cfg.vgs_level);
@@ -459,6 +761,11 @@ static void handle_at_line(struct hfp_app *app, const char *line)
 				app->slc_ready = true;
 				LOG("[hfp] SLC established");
 				emit_hfp_state(app);
+				send_hfp_battery(app);
+				queue_at(app, "AT+XAPL=0000-0000-0100,2");
+			} else if (strncmp(app->at_current, "AT+XAPL=", 8) == 0 && ok) {
+				app->ag_xapl_supported = true;
+				send_hfp_battery(app);
 			}
 			app->at_inflight = false;
 			pump_at_queue(app);
@@ -509,6 +816,8 @@ static void close_rfcomm(struct hfp_app *app)
 	app->at_head = app->at_tail = 0;
 	app->at_inflight = false;
 	app->slc_ready = false;
+	app->ag_hf_ind_battery_enabled = false;
+	app->ag_xapl_supported = false;
 	app->val_call = app->val_callsetup = app->val_callheld = 0;
 	app->device_path[0] = app->peer_addr[0] = app->caller_id[0] = '\0';
 	emit_hfp_state(app);
@@ -804,10 +1113,10 @@ static void handle_profile_method(GDBusConnection *conn, const gchar *sender,
 		    app->device_path, app->peer_addr, fd);
 		g_dbus_method_invocation_return_value(invocation, NULL);
 
-		/* Initiate HFP 1.7 SLC: bits 0|1|2|4|5|7 = 183 */
+		/* Initiate HFP 1.7 SLC: bits 0|1|2|4|5|7|8 = 439 (includes HF Indicators) */
 		emit_hfp_state(app);
 		emit_audio_state(app);
-		queue_at(app, "AT+BRSF=183");
+		queue_at(app, "AT+BRSF=439");
 	}
 }
 
@@ -1198,6 +1507,32 @@ static void on_bluez_interfaces_removed(GDBusConnection *conn, const gchar *send
 		scan_bluez_devices(app);
 }
 
+static void register_gatt_application(struct hfp_app *app)
+{
+	GVariantBuilder b;
+	GVariant *res;
+	GError *err = NULL;
+
+	if (!app->sys_bus || app->gatt_registered)
+		return;
+	g_variant_builder_init(&b, G_VARIANT_TYPE("a{sv}"));
+	res = g_dbus_connection_call_sync(
+		app->sys_bus, "org.bluez", "/org/bluez/hci0",
+		"org.bluez.GattManager1", "RegisterApplication",
+		g_variant_new("(o@a{sv})", GATT_APP_PATH,
+			      g_variant_builder_end(&b)),
+		NULL, G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &err);
+	if (!res) {
+		LOG("[gatt] RegisterApplication failed: %s",
+		    err ? err->message : "unknown");
+		g_clear_error(&err);
+	} else {
+		g_variant_unref(res);
+		app->gatt_registered = true;
+		LOG("[gatt] Registered Battery Service (0x180F: 0x2A19, 0x2A1A, 0x2BED)");
+	}
+}
+
 static bool configure_bluez_adapter(struct hfp_app *app)
 {
 	const struct {
@@ -1222,6 +1557,7 @@ static bool configure_bluez_adapter(struct hfp_app *app)
 	app->pairing_active = false;
 	LOG("[bluez] Configured hci0 (Alias=%s, Powered=1, Discoverable=0, Pairable=0)",
 	    LOCAL_BT_ALIAS);
+	register_gatt_application(app);
 	scan_bluez_devices(app);
 	return true;
 }
@@ -1263,6 +1599,7 @@ static void on_bluez_vanished(GDBusConnection *conn, const gchar *name,
 		g_source_remove(app->adapter_timer_id);
 		app->adapter_timer_id = 0;
 	}
+	app->gatt_registered = false;
 	app->pairing_active = false;
 	close_rfcomm(app);
 	emit_bond_state(app);
@@ -1632,6 +1969,240 @@ static int send_ctl_cli(const char *sock_path, int argc, char **argv, int start)
 	return 0;
 }
 
+static int gatt_char_index(const char *obj_path)
+{
+	if (strcmp(obj_path, GATT_CHAR_LEVEL_PATH) == 0)
+		return 0;
+	if (strcmp(obj_path, GATT_CHAR_POWER_PATH) == 0)
+		return 1;
+	if (strcmp(obj_path, GATT_CHAR_STATUS_PATH) == 0)
+		return 2;
+	return -1;
+}
+
+static const char *gatt_char_uuid(int idx)
+{
+	switch (idx) {
+	case 0:
+		return GATT_CHAR_LEVEL_UUID;
+	case 1:
+		return GATT_CHAR_POWER_UUID;
+	case 2:
+		return GATT_CHAR_STATUS_UUID;
+	default:
+		return "";
+	}
+}
+
+static GVariant *build_gatt_flags_variant(void)
+{
+	GVariantBuilder b;
+
+	g_variant_builder_init(&b, G_VARIANT_TYPE("as"));
+	g_variant_builder_add(&b, "s", "read");
+	g_variant_builder_add(&b, "s", "notify");
+	return g_variant_builder_end(&b);
+}
+
+static void handle_gatt_om_method(GDBusConnection *conn, const gchar *sender,
+				  const gchar *obj_path, const gchar *iface_name,
+				  const gchar *method_name, GVariant *parameters,
+				  GDBusMethodInvocation *invocation,
+				  gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	GVariantBuilder objs;
+	GVariantBuilder svc_ifaces;
+	GVariantBuilder svc_props;
+	static const char *const char_paths[3] = {
+		GATT_CHAR_LEVEL_PATH,
+		GATT_CHAR_POWER_PATH,
+		GATT_CHAR_STATUS_PATH,
+	};
+
+	(void)conn;
+	(void)sender;
+	(void)obj_path;
+	(void)iface_name;
+	(void)parameters;
+
+	if (strcmp(method_name, "GetManagedObjects") != 0) {
+		g_dbus_method_invocation_return_error(
+			invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD,
+			"Unknown method");
+		return;
+	}
+
+	read_power_supply(app, NULL);
+
+	g_variant_builder_init(&objs, G_VARIANT_TYPE("a{oa{sa{sv}}}"));
+
+	g_variant_builder_init(&svc_props, G_VARIANT_TYPE("a{sv}"));
+	g_variant_builder_add(&svc_props, "{sv}", "UUID",
+			      g_variant_new_string(GATT_BAS_UUID));
+	g_variant_builder_add(&svc_props, "{sv}", "Primary",
+			      g_variant_new_boolean(TRUE));
+	g_variant_builder_init(&svc_ifaces, G_VARIANT_TYPE("a{sa{sv}}"));
+	g_variant_builder_add(&svc_ifaces, "{sa{sv}}", "org.bluez.GattService1",
+			      &svc_props);
+	g_variant_builder_add(&objs, "{oa{sa{sv}}}", GATT_SVC_PATH, &svc_ifaces);
+
+	for (int i = 0; i < 3; i++) {
+		GVariantBuilder cifaces;
+		GVariantBuilder cprops;
+		uint8_t val[4];
+		size_t len = build_gatt_char_value(app, i, val, sizeof(val));
+
+		g_variant_builder_init(&cprops, G_VARIANT_TYPE("a{sv}"));
+		g_variant_builder_add(&cprops, "{sv}", "UUID",
+				      g_variant_new_string(gatt_char_uuid(i)));
+		g_variant_builder_add(&cprops, "{sv}", "Service",
+				      g_variant_new_object_path(GATT_SVC_PATH));
+		g_variant_builder_add(&cprops, "{sv}", "Flags",
+				      build_gatt_flags_variant());
+		g_variant_builder_add(
+			&cprops, "{sv}", "Value",
+			g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, val, len, 1));
+		g_variant_builder_init(&cifaces, G_VARIANT_TYPE("a{sa{sv}}"));
+		g_variant_builder_add(&cifaces, "{sa{sv}}",
+				      "org.bluez.GattCharacteristic1", &cprops);
+		g_variant_builder_add(&objs, "{oa{sa{sv}}}", char_paths[i],
+				      &cifaces);
+	}
+
+	g_dbus_method_invocation_return_value(invocation,
+					      g_variant_new("(@a{oa{sa{sv}}})",
+							    g_variant_builder_end(&objs)));
+}
+
+static GVariant *handle_gatt_get_prop(GDBusConnection *conn, const gchar *sender,
+				      const gchar *obj_path, const gchar *iface_name,
+				      const gchar *prop_name, GError **error,
+				      gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	int idx;
+
+	(void)conn;
+	(void)sender;
+	(void)error;
+
+	if (strcmp(iface_name, "org.bluez.GattService1") == 0) {
+		if (strcmp(prop_name, "UUID") == 0)
+			return g_variant_new_string(GATT_BAS_UUID);
+		if (strcmp(prop_name, "Primary") == 0)
+			return g_variant_new_boolean(TRUE);
+		return NULL;
+	}
+
+	idx = gatt_char_index(obj_path);
+	if (idx < 0)
+		return NULL;
+
+	if (strcmp(prop_name, "UUID") == 0)
+		return g_variant_new_string(gatt_char_uuid(idx));
+	if (strcmp(prop_name, "Service") == 0)
+		return g_variant_new_object_path(GATT_SVC_PATH);
+	if (strcmp(prop_name, "Flags") == 0)
+		return build_gatt_flags_variant();
+	if (strcmp(prop_name, "Value") == 0) {
+		uint8_t val[4];
+		size_t len;
+		read_power_supply(app, NULL);
+		len = build_gatt_char_value(app, idx, val, sizeof(val));
+		return g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, val, len, 1);
+	}
+	return NULL;
+}
+
+static void handle_gatt_char_method(GDBusConnection *conn, const gchar *sender,
+				    const gchar *obj_path, const gchar *iface_name,
+				    const gchar *method_name, GVariant *parameters,
+				    GDBusMethodInvocation *invocation,
+				    gpointer user_data)
+{
+	struct hfp_app *app = user_data;
+	int idx = gatt_char_index(obj_path);
+
+	(void)conn;
+	(void)sender;
+	(void)iface_name;
+	(void)parameters;
+
+	if (idx < 0) {
+		g_dbus_method_invocation_return_error(
+			invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_OBJECT,
+			"Unknown characteristic");
+		return;
+	}
+
+	if (strcmp(method_name, "ReadValue") == 0) {
+		uint8_t val[4];
+		size_t len;
+		read_power_supply(app, NULL);
+		len = build_gatt_char_value(app, idx, val, sizeof(val));
+		g_dbus_method_invocation_return_value(
+			invocation,
+			g_variant_new("(@ay)",
+				      g_variant_new_fixed_array(
+					      G_VARIANT_TYPE_BYTE, val, len, 1)));
+	} else if (strcmp(method_name, "StartNotify") == 0) {
+		app->gatt_notify[idx] = true;
+		g_dbus_method_invocation_return_value(invocation, NULL);
+	} else if (strcmp(method_name, "StopNotify") == 0) {
+		app->gatt_notify[idx] = false;
+		g_dbus_method_invocation_return_value(invocation, NULL);
+	} else {
+		g_dbus_method_invocation_return_error(
+			invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD,
+			"Unknown method");
+	}
+}
+
+static void register_gatt_dbus_objects(struct hfp_app *app)
+{
+	static const GDBusInterfaceVTable om_vtable = {
+		.method_call = handle_gatt_om_method,
+	};
+	static const GDBusInterfaceVTable svc_vtable = {
+		.get_property = handle_gatt_get_prop,
+	};
+	static const GDBusInterfaceVTable char_vtable = {
+		.method_call = handle_gatt_char_method,
+		.get_property = handle_gatt_get_prop,
+	};
+	static const char *const char_paths[3] = {
+		GATT_CHAR_LEVEL_PATH,
+		GATT_CHAR_POWER_PATH,
+		GATT_CHAR_STATUS_PATH,
+	};
+	GDBusNodeInfo *om_info = g_dbus_node_info_new_for_xml(gatt_om_xml, NULL);
+	GDBusNodeInfo *svc_info = g_dbus_node_info_new_for_xml(gatt_svc_xml, NULL);
+	GDBusNodeInfo *char_info = g_dbus_node_info_new_for_xml(gatt_char_xml, NULL);
+
+	if (om_info) {
+		app->gatt_om_reg_id = g_dbus_connection_register_object(
+			app->sys_bus, GATT_APP_PATH, om_info->interfaces[0],
+			&om_vtable, app, NULL, NULL);
+		g_dbus_node_info_unref(om_info);
+	}
+	if (svc_info) {
+		app->gatt_svc_reg_id = g_dbus_connection_register_object(
+			app->sys_bus, GATT_SVC_PATH, svc_info->interfaces[0],
+			&svc_vtable, app, NULL, NULL);
+		g_dbus_node_info_unref(svc_info);
+	}
+	if (char_info) {
+		for (int i = 0; i < 3; i++) {
+			app->gatt_char_reg_id[i] = g_dbus_connection_register_object(
+				app->sys_bus, char_paths[i],
+				char_info->interfaces[0], &char_vtable, app,
+				NULL, NULL);
+		}
+		g_dbus_node_info_unref(char_info);
+	}
+}
+
 static gboolean on_quit_signal(gpointer user_data)
 {
 	g_main_loop_quit(user_data);
@@ -1648,6 +2219,7 @@ int main(int argc, char **argv)
 		.jack_fd = -1,
 		.slide_fd = -1,
 		.slider_open = true,
+		.bat_percent = -1,
 	};
 	struct alsa_bridge_cfg bcfg = {
 		.output_mode = OUTPUT_EARPIECE,
@@ -1727,6 +2299,9 @@ int main(int argc, char **argv)
 		LOG("Register object failed: %s", err ? err->message : "unknown");
 		goto out;
 	}
+	register_gatt_dbus_objects(&app);
+	read_power_supply(&app, NULL);
+	app.bat_timer_id = g_timeout_add_seconds(10, on_battery_poll, &app);
 
 	app.bluez_prop_sub_id = g_dbus_connection_signal_subscribe(
 		app.sys_bus, "org.bluez", "org.freedesktop.DBus.Properties",
@@ -1779,12 +2354,23 @@ out:
 		close(app.slide_fd);
 	if (app.adapter_timer_id)
 		g_source_remove(app.adapter_timer_id);
+	if (app.bat_timer_id)
+		g_source_remove(app.bat_timer_id);
 	if (app.bluez_watch_id)
 		g_bus_unwatch_name(app.bluez_watch_id);
 	if (app.bluez_prop_sub_id && app.sys_bus)
 		g_dbus_connection_signal_unsubscribe(app.sys_bus, app.bluez_prop_sub_id);
 	if (app.bluez_rem_sub_id && app.sys_bus)
 		g_dbus_connection_signal_unsubscribe(app.sys_bus, app.bluez_rem_sub_id);
+	if (app.gatt_om_reg_id && app.sys_bus)
+		g_dbus_connection_unregister_object(app.sys_bus, app.gatt_om_reg_id);
+	if (app.gatt_svc_reg_id && app.sys_bus)
+		g_dbus_connection_unregister_object(app.sys_bus, app.gatt_svc_reg_id);
+	for (int i = 0; i < 3; i++) {
+		if (app.gatt_char_reg_id[i] && app.sys_bus)
+			g_dbus_connection_unregister_object(app.sys_bus,
+							    app.gatt_char_reg_id[i]);
+	}
 	if (app.reg_id)
 		g_dbus_connection_unregister_object(app.sys_bus, app.reg_id);
 	if (app.sys_bus)
